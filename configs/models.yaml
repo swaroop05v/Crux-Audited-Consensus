@@ -25,27 +25,33 @@ backends:
     type: hf_local
 
 models:
+  # Consultants: 4-bit AWQ checkpoints, one T4 each (decisions D9). vLLM's AWQ kernels need compute capability
+  # 7.5, which T4 meets. Qwen3 needs vLLM >= 0.8.5.
   consultant_a:
-    hf_repo: Qwen/Qwen3-8B
-    revision: b968826d9c46dd6066d109eabc6255188de91218
+    hf_repo: Qwen/Qwen3-8B-AWQ   # official Qwen AWQ (4-bit, group 128, GEMM)
+    revision: 4da05a8edb55c6046cce958586c33b61da07bb79
+    base_model: Qwen/Qwen3-8B
+    base_revision: b968826d9c46dd6066d109eabc6255188de91218
     backend: vllm
     served_name: qwen3-8b        # must match vLLM --served-model-name
-    dtype: float16               # T4 has no bf16
-    quantization: none           # fp16 needs tensor_parallel_size 2 on 2xT4 (audit 4.1 item 5); team to confirm
-    tensor_parallel_size: 2
+    dtype: float16               # T4 has no bf16; AWQ runs fp16 activations
+    quantization: awq
+    tensor_parallel_size: 1
     max_model_len: 16384
     chat_template_kwargs: {enable_thinking: false}
     strip_think: true            # thinking-off templates can still emit an empty <think></think> block
   consultant_b:
-    hf_repo: meta-llama/Llama-3.1-8B-Instruct
-    revision: 0e9e39f249a16976918f6564b8830bc894c89659
+    hf_repo: hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4  # 4-bit, group 128, GEMM; ungated mirror
+    revision: db1f81ad4b8c7e39777509fac66c652eb0a52f91
+    base_model: meta-llama/Llama-3.1-8B-Instruct
+    base_revision: 0e9e39f249a16976918f6564b8830bc894c89659
     backend: vllm
     served_name: llama-3.1-8b-instruct
     dtype: float16
-    quantization: none
-    tensor_parallel_size: 2
+    quantization: awq
+    tensor_parallel_size: 1
     max_model_len: 16384
-    chat_template_kwargs: {date_string: "26 Jul 2024"}  # template injects today's date otherwise; pin it
+    chat_template_kwargs: {date_string: "26 Jul 2024"}  # pinned so the prompt never contains today's date
   judge_l1_qwen:                 # Layer 1; also the same-family Layer 2 run and the base-DR judge
     hf_repo: Qwen/Qwen2.5-1.5B-Instruct
     revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306

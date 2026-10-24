@@ -3,6 +3,25 @@
 Decisions that refine Doc 1 / Doc 2 without editing them. Newest first. Section references (§, P1–P7) point to
 [step0_audit.md](step0_audit.md).
 
+## 2026-10-24: Consultant serving
+
+### D9. Consultants run as 4-bit AWQ on a single T4 each (audit §4.1 item 5)
+
+| Consultant | Checkpoint (pinned revision) | Base model |
+|---|---|---|
+| A | `Qwen/Qwen3-8B-AWQ` @ `4da05a8e` (official Qwen) | `Qwen/Qwen3-8B` |
+| B | `hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4` @ `db1f81ad` | `meta-llama/Llama-3.1-8B-Instruct` |
+
+- **Settings:** both checkpoints are 4-bit AWQ (group size 128, GEMM), served by vLLM with fp16 activations,
+  `tensor_parallel_size: 1` and `max_model_len: 16384`. The two consultants can run on Kaggle's two T4s at
+  once, one per GPU.
+- **Applies to the whole kill test.** No fp16 runs are mixed in (one backend and one quantization per model).
+  Quantization is logged in every call's `meta`.
+- **Template checks** on the pinned revisions: the Qwen AWQ template supports `enable_thinking`. The Llama AWQ
+  template takes `date_string` and defaults to "26 Jul 2024", the same date `models.yaml` pins.
+- **Caveat for the write-up:** these are quantized consultants, a further step down from the paper's frontier
+  models.
+
 ## 2026-10-24: Step-0 open questions
 
 ### D1. Protocol fixes for the kill test (audit §3.3)

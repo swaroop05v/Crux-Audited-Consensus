@@ -20,8 +20,13 @@ class RegistryTest(unittest.TestCase):
     def test_models_and_pins(self):
         self.assertEqual(set(REGISTRY.models),
                          {"consultant_a", "consultant_b", "judge_l1_qwen", "judge_l2_llama", "judge_l2_gemma"})
-        self.assertEqual(REGISTRY.spec("consultant_a").hf_repo, "Qwen/Qwen3-8B")
+        self.assertEqual(REGISTRY.spec("consultant_a").hf_repo, "Qwen/Qwen3-8B-AWQ")
         self.assertEqual(REGISTRY.spec("consultant_a").chat_template_kwargs, {"enable_thinking": False})
+        for key in ("consultant_a", "consultant_b"):  # decisions D9
+            spec = REGISTRY.spec(key)
+            self.assertEqual((spec.quantization, spec.dtype, spec.extra["tensor_parallel_size"]),
+                             ("awq", "float16", 1))
+            self.assertIn("base_model", spec.describe())
         self.assertEqual(REGISTRY.spec("judge_l2_gemma").hf_repo, "google/gemma-3-1b-it")
         for key in ("consultant_a", "consultant_b"):
             self.assertEqual(REGISTRY.spec(key).backend, "vllm")
