@@ -1,0 +1,75 @@
+# Model registry for the kill test. One backend per model for the whole kill test (CLAUDE.md); the backend
+# classes refuse a model whose `backend` is not theirs. Revisions are pinned HF commit hashes (fetched 2026-10-24).
+# Llama and Gemma repos are gated: each member accepts the licence on Hugging Face before downloading.
+
+backends:
+  vllm:                          # vLLM OpenAI-compatible server on Kaggle (consultants)
+    type: openai_compat
+    base_url_env: VLLM_BASE_URL  # e.g. http://localhost:8000/v1
+    api_key_env: VLLM_API_KEY    # optional; vLLM accepts any key unless started with --api-key
+    supports_n: true
+    send_chat_template_kwargs: true
+  openrouter:                    # not used by any model below; kept for prompt testing only
+    type: openai_compat
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    supports_n: false
+    send_chat_template_kwargs: false
+  groq:                          # not used by any model below; kept for prompt testing only
+    type: openai_compat
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    supports_n: false
+    send_chat_template_kwargs: false
+  hf_local:                      # transformers in-process (judges; needed for c_prob, audit 4.2)
+    type: hf_local
+
+models:
+  consultant_a:
+    hf_repo: Qwen/Qwen3-8B
+    revision: b968826d9c46dd6066d109eabc6255188de91218
+    backend: vllm
+    served_name: qwen3-8b        # must match vLLM --served-model-name
+    dtype: float16               # T4 has no bf16
+    quantization: none           # fp16 needs tensor_parallel_size 2 on 2xT4 (audit 4.1 item 5); team to confirm
+    tensor_parallel_size: 2
+    max_model_len: 16384
+    chat_template_kwargs: {enable_thinking: false}
+    strip_think: true            # thinking-off templates can still emit an empty <think></think> block
+  consultant_b:
+    hf_repo: meta-llama/Llama-3.1-8B-Instruct
+    revision: 0e9e39f249a16976918f6564b8830bc894c89659
+    backend: vllm
+    served_name: llama-3.1-8b-instruct
+    dtype: float16
+    quantization: none
+    tensor_parallel_size: 2
+    max_model_len: 16384
+    chat_template_kwargs: {date_string: "26 Jul 2024"}  # template injects today's date otherwise; pin it
+  judge_l1_qwen:                 # Layer 1; also the same-family Layer 2 run and the base-DR judge
+    hf_repo: Qwen/Qwen2.5-1.5B-Instruct
+    revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+    backend: hf_local
+    dtype: float16
+    quantization: none
+  judge_l2_llama:                # Layer 2 (cross-family); family confound with consultant_b logged (decisions D4)
+    hf_repo: meta-llama/Llama-3.2-1B-Instruct
+    revision: 9213176726f574b556790deb65791e0c5aa438b6
+    backend: hf_local
+    dtype: float16
+    quantization: none
+    chat_template_kwargs: {date_string: "26 Jul 2024"}
+  judge_l2_gemma:                # neutral-family Layer-2 ablation (decisions D4)
+    hf_repo: google/gemma-3-1b-it
+    revision: dcc83ea841ab6100d6b47a070329e1ba4cf78752
+    backend: hf_local
+    dtype: float32               # Gemma is trained in bf16 and fp16 overflow has been reported; 1B fits in fp32 on a T4
+    quantization: none
+
+# Sampling per call type (decisions D3). max_tokens is set by each caller.
+sampling:
+  consultant:    {temperature: 0.7, top_p: 0.9}   # initial answers, DR turns, Prompts 1A and 1B
+  leak_probe:    {temperature: 0.0, top_p: null}  # Prompt 1C
+  judge_verdict: {temperature: 0.0, top_p: null}  # verdict and c_prob pass
+  judge_cons:    {temperature: 0.7, top_p: null}  # c_cons samples
+  judge_layer2:  {temperature: 0.0, top_p: null}  # both Layer-2 variants

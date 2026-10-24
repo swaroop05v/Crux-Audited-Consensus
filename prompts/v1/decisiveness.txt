@@ -1,0 +1,28 @@
+SYSTEM:
+You are a rigorous logical evaluator. You must determine how the final answer to a question depends on whether a specific sub-claim (the crux) is TRUE or FALSE.
+
+USER:
+Consider the following question and two candidate answers ({answer_1} and {answer_2}):
+
+[QUESTION]
+{question}
+{choices_formatted}
+
+[CANDIDATE ANSWERS]
+- {answer_1}
+- {answer_2}
+
+[CRUX CLAIM C]
+"{crux_claim}"
+
+Perform two counterfactual evaluations strictly between {answer_1} and {answer_2}:
+1. Assume without question that Crux Claim C is 100% TRUE. Under this assumption, which candidate answer ({answer_1} or {answer_2}) must be correct?
+2. Assume without question that Crux Claim C is 100% FALSE. Under this assumption, which candidate answer ({answer_1} or {answer_2}) must be correct?
+
+Respond ONLY in valid JSON:
+{
+  "reasoning_if_true": "Brief explanation of why C being TRUE leads to the answer.",
+  "answer_if_true": "{answer_1} or {answer_2}",
+  "reasoning_if_false": "Brief explanation of why C being FALSE leads to the answer.",
+  "answer_if_false": "{answer_1} or {answer_2}"
+}

@@ -1,0 +1,31 @@
+SYSTEM:
+You are an expert consultant who answered a question differently from another expert. Your job is to isolate the single core factual, mathematical, or logical sub-claim (the "crux") where your reasoning and theirs diverge.
+
+USER:
+You answered {my_answer}. The other expert answered {other_answer}.
+
+[QUESTION]
+{question}
+{choices_formatted}
+
+[YOUR INITIAL REASONING (Answer: {my_answer})]
+{my_reasoning}
+
+[OTHER EXPERT'S INITIAL REASONING (Answer: {other_answer})]
+{other_reasoning}
+
+TASK:
+Identify the single most important factual, mathematical, or scientific claim that the two reasoning traces disagree on, such that knowing whether this single claim is TRUE or FALSE would settle which final answer ({my_answer} or {other_answer}) is correct.
+
+STRICT RULES FOR WRITING THE CRUX CLAIM:
+1. SELF-CONTAINED: A reader who has NEVER seen the original question, the answer choices, or either argument must be able to read your claim alone and verify whether it is TRUE or FALSE. Define any specific quantities, equations, or entities inside the claim itself.
+2. ATOMIC & EASIER THAN THE FULL QUESTION: State the specific disputed step, calculation, or property (e.g., "7 * 13 = 91" rather than "91 is not a prime number"). Do NOT merely restate the full question.
+3. NO ANSWER RESTATEMENT: Do not state, paraphrase, or name the content of any answer option. The claim must be an intermediate step, not the conclusion.
+4. NO META-REFERENCES: Never mention "I", "the other expert", "consultant", "Option A/B/C/D", or "the question".
+5. DECLARATIVE TRUE/FALSE STATEMENT: Write it as a clear declarative sentence that is unambiguously either TRUE or FALSE.
+
+Respond ONLY in valid JSON:
+{
+  "disagreement_analysis": "1-2 sentences explaining the exact step where the two reasoning traces diverge.",
+  "crux_claim": "Your single, self-contained declarative TRUE/FALSE statement."
+}

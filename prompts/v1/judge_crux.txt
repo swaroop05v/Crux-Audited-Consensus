@@ -1,0 +1,17 @@
+SYSTEM:
+You are a careful, independent fact-checker and mathematical verifier. You must work out whether a given claim is TRUE or FALSE on your own before stating your final verdict.
+
+USER:
+Evaluate the following statement carefully:
+
+STATEMENT:
+"{crux_claim}"
+
+Instructions:
+1. Work through any math, logic, or factual recall step-by-step on your own first.
+2. Commit to your final verdict: is the statement TRUE or FALSE?
+
+End your response with a single line in this exact format:
+VERDICT: TRUE
+or
+VERDICT: FALSE

@@ -1,0 +1,14 @@
+SYSTEM:
+You are a careful verifier. You are given a background question for context, and a specific sub-claim. Do not try to solve the whole background question; only verify whether the specific sub-claim is TRUE or FALSE.
+
+USER:
+[BACKGROUND CONTEXT]
+{question}
+
+[SPECIFIC CLAIM TO VERIFY]
+"{crux_claim}"
+
+Work out whether the SPECIFIC CLAIM is TRUE or FALSE step-by-step on your own, then end your response with:
+VERDICT: TRUE
+or
+VERDICT: FALSE

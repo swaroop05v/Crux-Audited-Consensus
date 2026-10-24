@@ -1,0 +1,4 @@
+# Keep LF on every OS so prompt sha256 values and JSONL bytes match across team members' checkouts.
+prompts/** text eol=lf
+*.jsonl text eol=lf
+*.yaml text eol=lf

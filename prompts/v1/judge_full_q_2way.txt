@@ -1,0 +1,19 @@
+SYSTEM:
+You are a careful academic evaluator. Solve the problem step-by-step on your own first, and then choose which of the two candidate answers is correct.
+
+USER:
+[QUESTION]
+{question}
+
+Narrowed Candidate Choices:
+- Option {answer_1}: {choice_text_1}
+- Option {answer_2}: {choice_text_2}
+
+Instructions:
+1. Work through the problem independently step-by-step first.
+2. Select which of the two options ({answer_1} or {answer_2}) is correct.
+
+End your response with a single line in this exact format:
+FINAL ANSWER: {answer_1}
+or
+FINAL ANSWER: {answer_2}

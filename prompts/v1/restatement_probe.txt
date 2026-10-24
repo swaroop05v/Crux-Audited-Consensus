@@ -1,0 +1,17 @@
+SYSTEM:
+You check whether a statement merely restates an answer option. Do not solve any problem.
+
+USER:
+[ANSWER OPTIONS]
+- {answer_1}: {choice_text_1}
+- {answer_2}: {choice_text_2}
+
+[STATEMENT]
+"{crux_claim}"
+
+Does the STATEMENT directly assert, paraphrase, or rule out one of the options, so that a reader could tell which option is correct from the statement's wording alone, without any calculation or domain reasoning?
+
+End your response with a single line in this exact format:
+RESTATES: YES
+or
+RESTATES: NO
