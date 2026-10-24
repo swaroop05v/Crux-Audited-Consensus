@@ -15,7 +15,11 @@ If the code and these docs disagree, flag it and ask before changing either one.
 - `collaborative-dr/data/{GPQA,SuperGPQA,HLE}/` holds the paper's precomputed initial answers from frontier models:
   `gpt_4o.json` + `claude.json` (pair A) and `glm.json` + `kimi.json` (pair B). Each file is a list of records with
   `index`, `choices`, `correct_choice`, `model_answer`, `model_reasoning`, `model_correct`. GPQA and SuperGPQA use a
-  `Question` field; HLE uses `question`.
+  `Question` field, except GPQA `kimi.json`, which lacks it in 51 of 101 records (take it from `glm.json`). HLE uses
+  `question`, which `run.py` does not read, so HLE runs through `run.py` get an empty question.
+- `run.py`'s `format_choices_text` only splits options A-D; pass `choices` as a dict to avoid garbling options E-J.
+- Answer-revealing fields (`Correct Answer`, `Incorrect Answer 1-3`, `answer`, `answer_letter`, `correct_answer`,
+  `rationale`, `debug_meta`, `raw_*`) must never be copied into method inputs.
 - Within each pair the files are already aligned by index and already filtered to the paper's disagreement set: every record
   has the two models disagreeing and exactly one of them right (620 cases in total). These are the source for seed_30.
 - `run.py` calls models only through OpenRouter (`call_openrouter`) and reads its config from `collaborative-dr/.env`

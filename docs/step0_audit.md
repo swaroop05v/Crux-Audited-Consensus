@@ -101,6 +101,7 @@ Smaller notes:
 | A3 | Invalid model answers: SuperGPQA glm `"A, D"`; HLE claude `"CANNOT DETERMINE WITHOUT IMAGE"`. | 1 each |
 | A4 | `index` is per pair, not global. GPQA indices overlap across pairs but point to different questions (only 1 of 34 overlapping indices has the same question). Separately, 27 GPQA, 31 SuperGPQA and 12 HLE question texts appear in both pairs. | — |
 | A5 | `format_choices_text` mis-parses options (A-D-only regex, plus one GPQA case where `(ctDNA)` triggers a false split). | GPQA 1/126, SuperGPQA 152/153, HLE 86/88 |
+| A6 | *(Found while building seed_30.)* In GPQA pair A, `correct_choice` points to one of GPQA's own `Incorrect Answer` texts; GPQA's `Correct Answer` text sits at another letter. The option set matches GPQA exactly, so the letter label is what's wrong. Under GPQA's own key, 10 of these 15 have **both** models wrong (not a valid disagreement case) and 5 have the right model swapped. GPQA pair B and SuperGPQA (checked against `answer`) have no such mismatch. The seed builder drops these records. | 15 / 126 |
 
 ### 2.3 Files mentioned in our docs: do they exist?
 
