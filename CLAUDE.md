@@ -22,6 +22,8 @@ If the code and these docs disagree, flag it and ask before changing either one.
   `rationale`, `debug_meta`, `raw_*`) must never be copied into method inputs.
 - Within each pair the files are already aligned by index and already filtered to the paper's disagreement set: every record
   has the two models disagreeing and exactly one of them right (620 cases in total). These are the source for seed_30.
+- In 15/126 GPQA pair-A records, `correct_choice` and the `Correct Answer` text disagree; neither key is reliable for
+  these, so they are excluded from seed_30.
 - `run.py` calls models only through OpenRouter (`call_openrouter`) and reads its config from `collaborative-dr/.env`
   (see `.env.example`). Running our 8B or local models needs a backend adapter on our side.
 - `baselines/llm_debate/` is a git submodule (Khan et al., 2024 debate code). It is only needed for the debate baseline.
