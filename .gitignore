@@ -1,0 +1,17 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# run outputs (large; share results via the repo only when small)
+outputs/
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

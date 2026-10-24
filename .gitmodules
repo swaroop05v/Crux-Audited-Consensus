@@ -1,0 +1,3 @@
+[submodule "collaborative-dr"]
+	path = collaborative-dr
+	url = https://github.com/ChicagoHAI/collaborative-dr.git
