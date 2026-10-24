@@ -15,8 +15,11 @@ Decisions that refine Doc 1 / Doc 2 without editing them. Newest first. Section 
 - **Settings:** both checkpoints are 4-bit AWQ (group size 128, GEMM), served by vLLM with fp16 activations,
   `tensor_parallel_size: 1` and `max_model_len: 16384`. The two consultants can run on Kaggle's two T4s at
   once, one per GPU.
-- **Applies to the whole kill test.** No fp16 runs are mixed in (one backend and one quantization per model).
-  Quantization is logged in every call's `meta`.
+- **Applies to the entire kill test, including after any move to college GPUs.** More GPU memory does not
+  change the checkpoints. No fp16 or other-quantization runs are mixed in (one backend and one quantization
+  per model).
+- **Every stage `meta` records the quantization** of each model it called. `Backend.chat` already puts it in
+  `ChatResult.params`, and every stage that calls a model copies those params into its `meta`.
 - **Template checks** on the pinned revisions: the Qwen AWQ template supports `enable_thinking`. The Llama AWQ
   template takes `date_string` and defaults to "26 Jul 2024", the same date `models.yaml` pins.
 - **Caveat for the write-up:** these are quantized consultants, a further step down from the paper's frontier
