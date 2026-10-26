@@ -12,6 +12,9 @@ dependencies = ["pyyaml>=6", "requests>=2.31"]
 [project.optional-dependencies]
 local = ["torch>=2.1", "transformers>=4.51"]  # hf_local judges; 4.51+ for Qwen3 and Gemma 3 templates
 
+[project.scripts]
+crux = "crux.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

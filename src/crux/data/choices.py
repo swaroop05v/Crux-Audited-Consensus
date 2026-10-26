@@ -16,6 +16,11 @@ class ChoiceParseError(ValueError):
     pass
 
 
+def format_choices(choices: Dict[str, str]) -> str:
+    """``{"A": "x", "B": "y"}`` -> ``"A. x\\nB. y"``, the ``{choices_formatted}`` field of our prompts."""
+    return "\n".join(f"{label}. {text}" for label, text in choices.items())
+
+
 def parse_choices(raw: Any) -> Dict[str, str]:
     if isinstance(raw, dict):
         return {str(label): str(text).strip() for label, text in raw.items()}

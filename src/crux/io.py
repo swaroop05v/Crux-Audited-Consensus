@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from crux.schema import LABEL_BLOCK, validate_record
+from crux.schema import LABEL_BLOCK, STAGE_KEYS, validate_record
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -72,12 +72,13 @@ def write_jsonl(path: Path, records: Iterable[Dict[str, Any]], stage: str) -> in
     """Validate and write records atomically (temp file, then replace). Returns the number written."""
     path = Path(path)
     records = list(records)
-    seen_ids = set()
+    key = STAGE_KEYS[stage]
+    seen = set()
     for position, record in enumerate(records):
         _raise_if_invalid(record, stage, f"record {position}")
-        if record["id"] in seen_ids:
-            raise SchemaError(f"record {position}: duplicate id {record['id']!r}")
-        seen_ids.add(record["id"])
+        if record[key] in seen:
+            raise SchemaError(f"record {position}: duplicate {key} {record[key]!r}")
+        seen.add(record[key])
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(path.name + ".tmp")

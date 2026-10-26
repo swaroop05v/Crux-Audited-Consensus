@@ -8,8 +8,9 @@ Every pipeline stage writes its own JSONL file, one record per case (or per crux
 - ``eval`` (optional): every label-derived field. Method code must never read it; ``crux.io.read_jsonl`` strips
   it unless called with ``with_labels=True``.
 
-Only the ``cases`` stage is defined so far. Later stages add a ``validate_<stage>`` function and an entry in
-``STAGE_VALIDATORS`` when they are built.
+Defined stages: ``cases`` (keyed by ``id``) and the Track 1 stages ``crux_proposals``, ``leakage`` and
+``decisiveness`` (keyed by ``crux_id`` = ``"{id}#a"`` / ``"{id}#b"``, the consultant who proposed it). Later stages
+add a ``validate_<stage>`` function plus entries in ``STAGE_VALIDATORS`` and ``STAGE_KEYS`` when they are built.
 """
 
 from __future__ import annotations
@@ -155,8 +156,124 @@ def validate_cases(record: Dict[str, Any]) -> List[str]:
     return errors
 
 
+UNDETERMINED = "UNDETERMINED"
+_CRUX_ID_RE = re.compile(r"^(?P<id>.+)#(?P<side>[ab])$")
+
+
+def _check_crux_ref(record: Dict[str, Any], errors: List[str]) -> None:
+    """``crux_id`` is ``"{id}#a"`` or ``"{id}#b"`` and agrees with ``id`` and ``proposed_by``."""
+    match = _CRUX_ID_RE.match(str(record.get("crux_id") or ""))
+    if not match:
+        errors.append(f"crux_id: {record.get('crux_id')!r} must look like '<id>#a' or '<id>#b'")
+        return
+    if match.group("id") != record.get("id"):
+        errors.append("crux_id: prefix does not match id")
+    if record.get("proposed_by") != f"consultant_{match.group('side')}":
+        errors.append(f"proposed_by: must be consultant_{match.group('side')} for {record['crux_id']}")
+
+
+def _check_optional(record: Dict[str, Any], key: str, types: tuple, errors: List[str]) -> None:
+    if record.get(key) is not None and not isinstance(record.get(key), types):
+        errors.append(f"{key}: must be {' or '.join(t.__name__ for t in types)} or null")
+
+
+def _check_mapping(value: Any, path: str, errors: List[str]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != {"if_true", "if_false"}:
+        errors.append(f"{path}: must be null or {{if_true, if_false}}")
+
+
+def validate_crux_proposals(record: Dict[str, Any]) -> List[str]:
+    """Stage ``crux_proposals``: one Prompt 1A output per consultant per case."""
+    errors: List[str] = []
+    _check_crux_ref(record, errors)
+    if not isinstance(record.get("parse_ok"), bool):
+        errors.append("parse_ok: must be a bool")
+    elif record["parse_ok"] and not (isinstance(record.get("crux_claim"), str) and record["crux_claim"].strip()):
+        errors.append("crux_claim: must be a non-empty string when parse_ok")
+    elif not record["parse_ok"] and record.get("crux_claim") is not None:
+        errors.append("crux_claim: must be null when not parse_ok")
+    for key in ("raw_output", "call_error", "parse_error", "disagreement_analysis"):
+        _check_optional(record, key, (str,), errors)
+    _check_optional(record, "proposer_own_verdict", (bool,), errors)
+    return errors
+
+
+def validate_leakage(record: Dict[str, Any]) -> List[str]:
+    """Stage ``leakage``: L1 wording/number check, P5 flags (log only), optional L2 restatement probe."""
+    errors: List[str] = []
+    _check_crux_ref(record, errors)
+    status = record.get("status")
+    if status == "checked":
+        for key in ("l1", "p5_flags"):
+            if not isinstance(record.get(key), dict):
+                errors.append(f"{key}: must be an object")
+        if isinstance(record.get("l1"), dict) and not isinstance(record["l1"].get("flagged"), bool):
+            errors.append("l1.flagged: must be a bool")
+        _check_optional(record, "l2", (dict,), errors)
+        if not isinstance(record.get("is_leaky"), bool):
+            errors.append("is_leaky: must be a bool")
+    elif status == "no_claim":
+        if record.get("is_leaky") is not None:
+            errors.append("is_leaky: must be null when status is no_claim")
+    else:
+        errors.append(f"status: {status!r} not in ['checked', 'no_claim']")
+    return errors
+
+
+def validate_decisiveness(record: Dict[str, Any]) -> List[str]:
+    """Stage ``decisiveness``: per-consultant Prompt 1B samples plus the d / veto summary (P1, P6)."""
+    errors: List[str] = []
+    _check_crux_ref(record, errors)
+    status = record.get("status")
+    if status == "no_claim":
+        return errors
+    if status != "evaluated":
+        return errors + [f"status: {status!r} not in ['evaluated', 'no_claim']"]
+    k = record.get("k")
+    if not isinstance(k, int) or k < 1:
+        return errors + ["k: must be an int >= 1"]
+    samples = record.get("samples")
+    if not isinstance(samples, list) or len(samples) != 2 * k:
+        errors.append(f"samples: must be a list of 2*k = {2 * k} per-consultant samples")
+        samples = []
+    for position, sample in enumerate(samples):
+        if not isinstance(sample, dict) or sample.get("consultant") not in CONSULTANTS:
+            errors.append(f"samples[{position}]: consultant must be one of {CONSULTANTS}")
+            continue
+        if not isinstance(sample.get("parse_ok"), bool):
+            errors.append(f"samples[{position}].parse_ok: must be a bool")
+        order = sample.get("answer_order")
+        if not (isinstance(order, list) and len(order) == 2):
+            errors.append(f"samples[{position}].answer_order: must list the two answers in prompt order")
+        for branch in ("if_true", "if_false"):
+            value = sample.get(branch)
+            if value is not None and value != UNDETERMINED and (not isinstance(order, list) or value not in order):
+                errors.append(f"samples[{position}].{branch}: {value!r} is not an answer in play or UNDETERMINED")
+    for key in ("d", "d_a", "d_b", "flip_rate_a", "flip_rate_b"):
+        value = record.get(key)
+        if not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            errors.append(f"{key}: must be a number in [0, 1]")
+    _check_mapping(record.get("agreed_mapping"), "agreed_mapping", errors)
+    if not isinstance(record.get("veto_flag"), bool):
+        errors.append("veto_flag: must be a bool")
+    return errors
+
+
 STAGE_VALIDATORS: Dict[str, Callable[[Dict[str, Any]], List[str]]] = {
     "cases": validate_cases,
+    "crux_proposals": validate_crux_proposals,
+    "leakage": validate_leakage,
+    "decisiveness": validate_decisiveness,
+}
+
+# The field each stage file is keyed by (unique per file); ``id`` always joins back to ``cases``.
+STAGE_KEYS: Dict[str, str] = {
+    "cases": "id",
+    "crux_proposals": "crux_id",
+    "leakage": "crux_id",
+    "decisiveness": "crux_id",
 }
 
 

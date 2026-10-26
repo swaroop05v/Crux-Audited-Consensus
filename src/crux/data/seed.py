@@ -148,12 +148,19 @@ def build_seed(per_dataset: int, seed: int) -> Tuple[List[Dict[str, Any]], Count
     return selected, skipped
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "data" / "seed" / "seed_30.jsonl")
     parser.add_argument("--per-dataset", type=int, default=20, help="Cases per dataset (GPQA, SuperGPQA).")
     parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    add_arguments(parser)
+    run(parser.parse_args(argv))
+
+
+def run(args: argparse.Namespace) -> None:
 
     records, skipped = build_seed(args.per_dataset, args.seed)
     meta = stage_meta(
