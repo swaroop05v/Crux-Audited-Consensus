@@ -138,6 +138,11 @@ class ChatResult:
             raise BackendError(f"ChatResult has {len(self.texts)} completions; use .texts")
         return self.texts[0]
 
+    @property
+    def finish_reason(self) -> Optional[str]:
+        """Finish reason of the single completion; "length" means it was cut off at max_tokens."""
+        return self.params["finish_reasons"][0] if len(self.texts) == 1 else None
+
 
 def validate_messages(messages: Any) -> None:
     if not isinstance(messages, list) or not messages:
@@ -194,6 +199,8 @@ class Backend(ABC):
             raise BackendError(f"{self.name}: expected {n} completions, got {len(texts)}")
         if spec.strip_think:
             texts = [strip_think(text) for text in texts]
+        # One finish reason per completion ("stop", "length", ... or None when the backend cannot tell).
+        finish_reasons = list(extra.pop("finish_reasons", None) or [None] * n)
         params = {
             **spec.describe(),
             "backend": self.name,
@@ -203,6 +210,8 @@ class Backend(ABC):
             "seed": seed,
             "n": n,
             **extra,
+            "finish_reasons": finish_reasons,
+            "truncated": any(reason == "length" for reason in finish_reasons),
         }
         return ChatResult(texts=texts, params=params)
 

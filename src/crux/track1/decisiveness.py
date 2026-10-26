@@ -32,8 +32,8 @@ from crux.io import index_by_id, read_jsonl, stage_meta, write_jsonl
 from crux.prompts import Prompt, load_prompt
 from crux.schema import SCHEMA_VERSION, UNDETERMINED
 from crux.seeding import stable_seed
-from crux.track1.common import (CONSULTANT_ROLES, load_cases, make_backend, params_without_seed,
-                                parse_json_object, run_path, safe_chat, side)
+from crux.track1.common import (CONSULTANT_ROLES, failure_summary, load_cases, make_backend, parse_json_object,
+                                parse_outcome, run_path, safe_chat, shared_call_params, side)
 
 STAGE = "decisiveness"
 PROMPT_NAME = "decisiveness"
@@ -162,15 +162,14 @@ def evaluate_crux(proposal: Dict[str, Any], case: Dict[str, Any], backend: Backe
         for index in range(k):
             order = answer_order(seed, proposal["crux_id"], role, index, pair)
             call_seed = stable_seed(seed, STAGE, proposal["crux_id"], role, index)
-            text, params, call_error = safe_chat(backend, role, sample_messages(case, proposal["crux_claim"],
-                                                                                order, prompt),
-                                                 **registry.sampling("consultant"), max_tokens=max_tokens,
-                                                 seed=call_seed)
-            parsed = parse_sample(text, pair) if call_error is None else {
-                "parse_ok": False, "parse_error": "call failed", "if_true": None, "if_false": None}
+            outcome = safe_chat(backend, role, sample_messages(case, proposal["crux_claim"], order, prompt),
+                                **registry.sampling("consultant"), max_tokens=max_tokens, seed=call_seed)
+            parsed = parse_outcome(outcome, lambda text: parse_sample(text, pair),
+                                   {"if_true": None, "if_false": None})
             samples.append({"consultant": role, "k": index, "answer_order": order, "seed": call_seed,
-                            **parsed, "raw_output": text, "call_error": call_error})
-            calls.setdefault(role, params_without_seed(params))
+                            **parsed, **outcome.fields()})
+            if outcome.params is not None:
+                calls.setdefault(role, shared_call_params(outcome.params))
     return {"status": "evaluated", "k": k, "answers_in_play": list(pair), "samples": samples,
             **summarize(samples, pair, proposal["proposed_by"], k, veto_threshold),
             "calls": calls}
@@ -227,6 +226,7 @@ def run_stage(*, cases_path: Path, run: str, backend_name: str, k: int = DEFAULT
     evaluated = [r for r in records if r["status"] == "evaluated"]
     vetoes = sum(r["veto_flag"] for r in evaluated)
     mean_d = sum(r["d"] for r in evaluated) / len(evaluated) if evaluated else 0.0
+    samples = [s for r in evaluated for s in r["samples"]]
     print(f"{STAGE}: wrote {len(records)} records to {out} ({len(evaluated)} evaluated, "
-          f"mean d {mean_d:.2f}, {vetoes} veto flags)")
+          f"mean d {mean_d:.2f}, {vetoes} veto flags; samples: {failure_summary(samples)})")
     return out

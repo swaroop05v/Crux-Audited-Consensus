@@ -3,9 +3,8 @@
 # Llama and Gemma repos are gated: each member accepts the licence on Hugging Face before downloading.
 
 backends:
-  vllm:                          # vLLM OpenAI-compatible server on Kaggle (consultants)
-    type: openai_compat
-    base_url_env: VLLM_BASE_URL  # e.g. http://localhost:8000/v1
+  vllm:                          # vLLM OpenAI-compatible servers on Kaggle (consultants), one model per server;
+    type: openai_compat          # each model names its own URL variable (base_url_env under models)
     api_key_env: VLLM_API_KEY    # optional; vLLM accepts any key unless started with --api-key
     supports_n: true
     send_chat_template_kwargs: true
@@ -33,6 +32,7 @@ models:
     base_model: Qwen/Qwen3-8B
     base_revision: b968826d9c46dd6066d109eabc6255188de91218
     backend: vllm
+    base_url_env: VLLM_BASE_URL_A  # this consultant's own vLLM server, e.g. http://localhost:8000/v1 (GPU 0)
     served_name: qwen3-8b        # must match vLLM --served-model-name
     dtype: float16               # T4 has no bf16; AWQ runs fp16 activations
     quantization: awq
@@ -46,6 +46,7 @@ models:
     base_model: meta-llama/Llama-3.1-8B-Instruct
     base_revision: 0e9e39f249a16976918f6564b8830bc894c89659
     backend: vllm
+    base_url_env: VLLM_BASE_URL_B  # e.g. http://localhost:8001/v1 (GPU 1)
     served_name: llama-3.1-8b-instruct
     dtype: float16
     quantization: awq

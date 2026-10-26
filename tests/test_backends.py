@@ -63,6 +63,12 @@ class FakeBackendTest(unittest.TestCase):
         self.assertEqual(meta["prompt_sha256"], prompt.sha256)
         json.dumps(meta)  # must be JSON-serializable for stage files
 
+    def test_fake_finish_reason(self):
+        backend = FakeBackend(REGISTRY, finish_reason=lambda key, index: "length" if index == 1 else "stop")
+        results = [backend.chat("judge_l1_qwen", MESSAGES, **JUDGE) for _ in range(2)]
+        self.assertEqual([r.finish_reason for r in results], ["stop", "length"])
+        self.assertEqual([r.params["truncated"] for r in results], [False, True])
+
     def test_cycled_responses_and_n(self):
         backend = FakeBackend(REGISTRY, responder=["x", "y"])
         result = backend.chat("judge_l1_qwen", MESSAGES, **JUDGE, n=3)
@@ -114,9 +120,11 @@ class FakeSession:
     def __init__(self, responses):
         self.responses = list(responses)
         self.payloads = []
+        self.urls = []
 
     def post(self, url, json=None, headers=None, timeout=None):
         self.payloads.append(json)
+        self.urls.append(url)
         return self.responses.pop(0)
 
 
@@ -191,17 +199,57 @@ class OpenAICompatTest(unittest.TestCase):
         with self.assertRaises(BackendError):
             other.chat("consultant_a", MESSAGES, **CONSULTANT)  # pinned to vllm
 
-    def test_get_backend_requires_base_url(self):
+    def test_finish_reason_logged_and_truncation_flagged(self):
+        response = FakeResponse(200, {"model": "qwen3-8b", "choices": [
+            {"message": {"content": '{"answer": "A"'}, "finish_reason": "length"}]})
+        backend, _, _ = make_backend([response])
+        result = backend.chat("consultant_a", MESSAGES, **CONSULTANT)
+        self.assertEqual(result.finish_reason, "length")
+        self.assertEqual(result.params["finish_reasons"], ["length"])
+        self.assertTrue(result.params["truncated"])
+
+    def test_empty_reply_cut_at_max_tokens_is_returned_not_raised(self):
+        response = FakeResponse(200, {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+        backend, _, _ = make_backend([response])
+        self.assertEqual(backend.chat("consultant_a", MESSAGES, **CONSULTANT).text, "")
+        backend, _, _ = make_backend([FakeResponse(200, {"choices": [{"message": {"content": ""},
+                                                                      "finish_reason": "stop"}]})])
+        with self.assertRaises(BackendError):
+            backend.chat("consultant_a", MESSAGES, **CONSULTANT)
+
+    def test_per_model_server_urls(self):
+        session, sleeps = FakeSession([ok("a"), ok("b", model="llama-3.1-8b-instruct")]), []
+        backend = OpenAICompatBackend(REGISTRY, "vllm", model_base_urls={
+            "consultant_a": "http://gpu0:8000/v1/", "consultant_b": "http://gpu1:8001/v1"},
+            send_chat_template_kwargs=True, session=session, sleep=sleeps.append)
+        first = backend.chat("consultant_a", MESSAGES, **CONSULTANT)
+        second = backend.chat("consultant_b", MESSAGES, **CONSULTANT)
+        self.assertEqual(session.urls, ["http://gpu0:8000/v1/chat/completions",
+                                        "http://gpu1:8001/v1/chat/completions"])
+        self.assertEqual((first.params["endpoint_host"], second.params["endpoint_host"]),
+                         ("gpu0:8000", "gpu1:8001"))
+        self.assertEqual(first.params["base_url_env"], "VLLM_BASE_URL_A")  # logged with the call
+
+    def test_from_config_reads_per_model_env_and_names_missing_variable(self):
         import os
-        saved = os.environ.pop("VLLM_BASE_URL", None)
+        names = ("VLLM_BASE_URL_A", "VLLM_BASE_URL_B")
+        saved = {name: os.environ.get(name) for name in names}
         try:
-            os.environ["VLLM_BASE_URL"] = ""
-            with self.assertRaises(BackendError):
-                get_backend(REGISTRY, "vllm")
+            os.environ["VLLM_BASE_URL_A"] = "http://gpu0:8000/v1"
+            os.environ["VLLM_BASE_URL_B"] = ""  # set but empty: load_env must not fill it from a local .env
+            session = FakeSession([ok("a")])
+            backend = get_backend(REGISTRY, "vllm", session=session, sleep=lambda s: None)
+            backend.chat("consultant_a", MESSAGES, **CONSULTANT)
+            self.assertEqual(session.urls, ["http://gpu0:8000/v1/chat/completions"])
+            with self.assertRaisesRegex(BackendError, "VLLM_BASE_URL_B"):
+                backend.chat("consultant_b", MESSAGES, **CONSULTANT)
+            self.assertEqual(len(session.urls), 1)  # nothing sent for the model without a URL
         finally:
-            os.environ.pop("VLLM_BASE_URL", None)
-            if saved is not None:
-                os.environ["VLLM_BASE_URL"] = saved
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 class FakeTokenizer:

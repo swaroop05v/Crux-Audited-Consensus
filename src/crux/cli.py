@@ -4,6 +4,7 @@
     crux track1 propose  --run seed_fake --backend fake
     crux track1 leakage  --run seed_fake [--l2 --backend fake]
     crux track1 decisive --run seed_fake --backend fake --k 3
+    crux track1 report   --run seed_fake
 
 Stage files go to data/runs/<run>/<stage>.jsonl (gitignored). Without installing: PYTHONPATH=src python -m crux ...
 """
@@ -27,7 +28,7 @@ def _common(parser: argparse.ArgumentParser, *, backend_default: Optional[str] =
 
 def build_parser() -> argparse.ArgumentParser:
     from crux.data import seed
-    from crux.track1 import decisiveness, extractor, leakage
+    from crux.track1 import decisiveness, extractor, leakage, report
 
     parser = argparse.ArgumentParser(prog="crux", description="Crux-Audited Consensus pipeline stages.")
     groups = parser.add_subparsers(dest="group", required=True)
@@ -66,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
     decisive.set_defaults(func=lambda a: decisiveness.run_stage(
         cases_path=a.cases, run=a.run, backend_name=a.backend, k=a.k, prompt_version=a.prompt_version,
         max_tokens=a.max_tokens, seed=a.seed))
+
+    summary = track1.add_parser("report", help="Failure/truncation, leakage, veto, UNDETERMINED and d summary "
+                                                "-> track1_report.json")
+    summary.add_argument("--run", required=True)
+    summary.set_defaults(func=lambda a: report.run_report(run=a.run))
     return parser
 
 

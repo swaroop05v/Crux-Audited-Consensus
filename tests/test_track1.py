@@ -68,7 +68,20 @@ class ExtractorTest(unittest.TestCase):
             self.assertFalse(record["parse_ok"])
             self.assertIsNone(record["crux_claim"])
             self.assertEqual(record["parse_error"], "no JSON object found")
+            self.assertEqual(record["failure_type"], "parse_error")
+            self.assertEqual(record["finish_reason"], "stop")
             self.assertEqual(record["raw_output"], "Sure! The crux is that 7 * 13 = 91.")
+        assert_stage_valid(self, records, "crux_proposals")
+
+    def test_truncated_reply_is_its_own_failure_type(self):
+        # Even a reply that happens to parse is not trusted when it was cut off at max_tokens.
+        backend = FakeBackend(REGISTRY, responder='{"crux_claim": "7 * 13 = 91"}', finish_reason="length")
+        records = extractor.propose([CASE], backend, REGISTRY)
+        for record in records:
+            self.assertEqual((record["parse_ok"], record["failure_type"]), (False, "truncated"))
+            self.assertEqual(record["parse_error"], "truncated at max_tokens")
+            self.assertIsNone(record["crux_claim"])
+            self.assertEqual(record["finish_reason"], "length")
         assert_stage_valid(self, records, "crux_proposals")
 
     def test_missing_claim_and_v1_prompt(self):
@@ -83,7 +96,9 @@ class ExtractorTest(unittest.TestCase):
             raise BackendError("HTTP 503 after retries")
         records = extractor.propose([CASE], FakeBackend(REGISTRY, responder=boom), REGISTRY)
         self.assertEqual(records[0]["call_error"], "HTTP 503 after retries")
+        self.assertEqual(records[0]["failure_type"], "call_error")
         self.assertIsNone(records[0]["raw_output"])
+        self.assertIsNone(records[0]["finish_reason"])
         assert_stage_valid(self, records, "crux_proposals")
 
 
@@ -169,14 +184,41 @@ class LeakageStageTest(unittest.TestCase):
         self.assertIn(f"- {Y}: {CASE['choices'][Y]}", user)
         assert_stage_valid(self, [record], "leakage")
 
-    def test_l2_unparseable_probe(self):
+    def test_both_probes_fail_falls_back_to_l1_and_is_marked(self):
         backend = FakeBackend(REGISTRY, responder="I cannot tell.")
+        cases = index_by_id(CASES)
+        clean, leaky = leakage.check([proposal("7 * 13 = 91", "a"),
+                                      proposal(f"The answer is {CASE['choices'][X]}.", "b")],
+                                     cases, backend=backend, registry=REGISTRY, run_l2=True)
+        for record in (clean, leaky):
+            self.assertIsNone(record["l2"]["flagged"])
+            self.assertTrue(record["leak_probe_failed"])
+            self.assertEqual(record["is_leaky"], record["l1"]["flagged"])  # L1 fallback
+            probe = record["l2"]["by_consultant"]["consultant_a"]
+            self.assertEqual((probe["parse_ok"], probe["failure_type"]), (False, "parse_error"))
+        self.assertEqual((clean["is_leaky"], leaky["is_leaky"]), (False, True))
+        assert_stage_valid(self, [clean, leaky], "leakage")
+
+    def test_one_probe_failing_is_not_probe_failed(self):
+        def probe(model_key, messages, index):
+            return "RESTATES: NO" if model_key == "consultant_a" else "unsure"
+        record = leakage.check([proposal("7 * 13 = 91")], index_by_id(CASES),
+                               backend=FakeBackend(REGISTRY, responder=probe), registry=REGISTRY, run_l2=True)[0]
+        self.assertIsNone(record["l2"]["flagged"])  # one NO is not enough to call it clean
+        self.assertFalse(record["leak_probe_failed"])
+        self.assertFalse(record["is_leaky"])
+
+    def test_truncated_probes_count_as_failed(self):
+        backend = FakeBackend(REGISTRY, responder="RESTATES: YES", finish_reason="length")
         record = leakage.check([proposal("7 * 13 = 91")], index_by_id(CASES), backend=backend,
                                registry=REGISTRY, run_l2=True)[0]
-        self.assertIsNone(record["l2"]["flagged"])
-        self.assertFalse(record["is_leaky"])  # undetermined L2 never overrides a clean L1 silently...
-        self.assertFalse(record["l2"]["by_consultant"]["consultant_a"]["parse_ok"])  # ...but is visible here
+        self.assertTrue(record["leak_probe_failed"])
+        self.assertEqual(record["l2"]["by_consultant"]["consultant_b"]["failure_type"], "truncated")
         self.assertEqual(leakage.parse_restates("x\nRESTATES: no"), False)
+
+    def test_probe_not_run(self):
+        record = leakage.check([proposal("7 * 13 = 91")], index_by_id(CASES))[0]
+        self.assertIsNone(record["leak_probe_failed"])
 
 
 # --------------------------------------------------------------------------- decisiveness (Prompt 1B v2)
@@ -269,6 +311,17 @@ class DecisivenessTest(unittest.TestCase):
         self.assertAlmostEqual(record["d"], 6 / 9)
         assert_stage_valid(self, [record], "decisiveness")
 
+    def test_truncated_sample(self):
+        backend = FakeBackend(REGISTRY, responder=reply(X, Y),
+                              finish_reason=lambda key, index: "length" if index == 4 else "stop")
+        record = decisiveness.evaluate([proposal("7 * 13 = 91")], index_by_id(CASES), backend, REGISTRY)[0]
+        bad = [s for s in record["samples"] if not s["parse_ok"]]
+        self.assertEqual([(s["consultant"], s["k"], s["failure_type"]) for s in bad],
+                         [("consultant_b", 1, "truncated")])
+        self.assertAlmostEqual(record["d"], 6 / 9)
+        self.assertNotIn("finish_reasons", record["meta"]["calls"]["consultant_a"])  # per-call, kept on samples
+        assert_stage_valid(self, [record], "decisiveness")
+
     def test_mapping_conflict(self):
         record, _ = run_decisive(lambda role, k, order: reply(X, Y) if role == "consultant_a" else reply(Y, X))
         self.assertEqual((record["d"], record["mapping_agree_rate"]), (0.0, 0.0))
@@ -296,6 +349,66 @@ class DecisivenessTest(unittest.TestCase):
                                        REGISTRY)[0]
         self.assertEqual(record["status"], "no_claim")
         assert_stage_valid(self, [record], "decisiveness")
+
+
+# --------------------------------------------------------------------------- report
+
+class ReportTest(unittest.TestCase):
+    def test_report_counts(self):
+        cases = CASES[:2]
+        second = cases[1]
+        leaky_claim = f"The answer is {second['choices'][second['consultant_b_init']['answer']]}."
+        # Proposals, in call order: case0#a ok, case0#b truncated, case1#a malformed, case1#b ok but leaky.
+        proposal_replies = [json.dumps({"crux_claim": "7 * 13 = 91", "own_verdict": "TRUE"}),
+                            json.dumps({"crux_claim": "cut"}), "not json",
+                            json.dumps({"crux_claim": leaky_claim})]
+        proposals = extractor.propose(cases, FakeBackend(
+            REGISTRY, responder=proposal_replies,
+            finish_reason=lambda key, index: "length" if index == 1 else "stop"), REGISTRY)
+        # Probes: both fail on the clean crux, both NO on the leaky one.
+        probes = FakeBackend(REGISTRY, responder=["??", "??", "RESTATES: NO", "RESTATES: NO"])
+        leak = leakage.check(proposals, index_by_id(cases), backend=probes, registry=REGISTRY, run_l2=True)
+
+        # Decisiveness: crux 1 clean (d = 1); crux 2 (proposed by B) vetoed by A, plus one UNDETERMINED from B.
+        def behaviour(role, k, order):
+            first, second_ = sorted(order)
+            if role == "consultant_a" and k >= 3:
+                return reply(first, first)
+            if role == "consultant_b" and k == 5:
+                return reply(UNDETERMINED, second_)
+            return reply(first, second_)
+        decisive = decisiveness.evaluate(proposals, index_by_id(cases),
+                                         FakeBackend(REGISTRY, responder=scripted(behaviour)), REGISTRY)
+
+        from crux.track1 import report
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("crux.track1.common.RUNS_DIR", Path(tmp)):
+            for stage, records in (("crux_proposals", proposals), ("leakage", leak), ("decisiveness", decisive)):
+                write_jsonl(Path(tmp) / "r" / f"{stage}.jsonl", records, stage)
+            cli_main(["track1", "report", "--run", "r"])
+            result = json.loads((Path(tmp) / "r" / "track1_report.json").read_text(encoding="utf-8"))
+
+        props = result["crux_proposals"]
+        self.assertEqual(props["parsed"]["count"], 2)
+        self.assertEqual({k: v["count"] for k, v in props["failures"].items()},
+                         {"call_error": 0, "truncated": 1, "parse_error": 1})
+        self.assertEqual(props["failures"]["truncated"]["rate"], 0.25)
+
+        lk = result["leakage"]
+        self.assertEqual((lk["n_checked"], lk["no_claim"]), (2, 2))
+        self.assertEqual(lk["l1_flagged"]["count"], 1)
+        self.assertEqual((lk["l2_flagged"]["count"], lk["l2_undetermined"]["count"]), (0, 1))
+        self.assertEqual(lk["leak_probe_failed"]["count"], 1)
+        self.assertEqual(lk["probe_call_failures"]["parse_error"]["count"], 2)
+        self.assertIn("p5_deictic", lk)
+
+        dc = result["decisiveness"]
+        self.assertEqual((dc["n_evaluated"], dc["no_claim"]), (2, 2))
+        self.assertEqual(dc["d"]["histogram"], {"0.00": 1, "1.00": 1})
+        self.assertEqual((dc["veto"]["count"], dc["veto"]["by_opponent"], dc["veto"]["vetoed_by"]),
+                         (1, 1, {"consultant_a": 1}))
+        self.assertEqual(dc["undetermined"]["samples_with_any"]["count"], 1)
+        self.assertEqual(dc["undetermined"]["branches"]["of"], 24)
+        self.assertEqual((dc["d_non_leaky"]["mean"], dc["veto_leaky"]["count"]), (1.0, 1))
 
 
 # --------------------------------------------------------------------------- CLI

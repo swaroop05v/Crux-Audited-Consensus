@@ -177,6 +177,20 @@ def _check_optional(record: Dict[str, Any], key: str, types: tuple, errors: List
         errors.append(f"{key}: must be {' or '.join(t.__name__ for t in types)} or null")
 
 
+FAILURE_TYPES = (None, "call_error", "truncated", "parse_error")
+
+
+def _check_failure(output: Dict[str, Any], path: str, errors: List[str]) -> None:
+    """``failure_type`` is set exactly when ``parse_ok`` is false; ``finish_reason`` is a string or null."""
+    failure = output.get("failure_type")
+    if failure not in FAILURE_TYPES:
+        errors.append(f"{path}failure_type: {failure!r} not in {list(FAILURE_TYPES)}")
+    elif isinstance(output.get("parse_ok"), bool) and output["parse_ok"] != (failure is None):
+        errors.append(f"{path}failure_type: must be null exactly when parse_ok is true")
+    if output.get("finish_reason") is not None and not isinstance(output["finish_reason"], str):
+        errors.append(f"{path}finish_reason: must be a string or null")
+
+
 def _check_mapping(value: Any, path: str, errors: List[str]) -> None:
     if value is None:
         return
@@ -197,6 +211,7 @@ def validate_crux_proposals(record: Dict[str, Any]) -> List[str]:
     for key in ("raw_output", "call_error", "parse_error", "disagreement_analysis"):
         _check_optional(record, key, (str,), errors)
     _check_optional(record, "proposer_own_verdict", (bool,), errors)
+    _check_failure(record, "", errors)
     return errors
 
 
@@ -214,6 +229,11 @@ def validate_leakage(record: Dict[str, Any]) -> List[str]:
         _check_optional(record, "l2", (dict,), errors)
         if not isinstance(record.get("is_leaky"), bool):
             errors.append("is_leaky: must be a bool")
+        probe_failed = record.get("leak_probe_failed")
+        if record.get("l2") is None and probe_failed is not None:
+            errors.append("leak_probe_failed: must be null when L2 did not run")
+        if record.get("l2") is not None and not isinstance(probe_failed, bool):
+            errors.append("leak_probe_failed: must be a bool when L2 ran")
     elif status == "no_claim":
         if record.get("is_leaky") is not None:
             errors.append("is_leaky: must be null when status is no_claim")
@@ -244,6 +264,7 @@ def validate_decisiveness(record: Dict[str, Any]) -> List[str]:
             continue
         if not isinstance(sample.get("parse_ok"), bool):
             errors.append(f"samples[{position}].parse_ok: must be a bool")
+        _check_failure(sample, f"samples[{position}].", errors)
         order = sample.get("answer_order")
         if not (isinstance(order, list) and len(order) == 2):
             errors.append(f"samples[{position}].answer_order: must list the two answers in prompt order")

@@ -24,10 +24,13 @@ class FakeBackend(Backend):
     name = "fake"
 
     def __init__(self, registry: Registry, responder: Responder = DEFAULT_RESPONSE,
-                 verdict: Optional[Dict[str, float]] = None):
+                 verdict: Optional[Dict[str, float]] = None,
+                 finish_reason: Union[str, Callable[[str, int], str]] = "stop"):
+        """``finish_reason`` is fixed, or ``(model_key, call_index) -> str`` (use "length" to simulate truncation)."""
         super().__init__(registry)
         self.responder = responder
         self.verdict = verdict or {"p_true_raw": 0.6, "p_false_raw": 0.2}
+        self.finish_reason = finish_reason
         self.calls: List[Dict[str, Any]] = []
 
     def spec(self, model_key: str) -> ModelSpec:
@@ -44,13 +47,16 @@ class FakeBackend(Backend):
     def _generate(self, spec: ModelSpec, messages: List[Dict[str, str]], *, temperature: float,
                   top_p: Optional[float], max_tokens: int, seed: Optional[int],
                   n: int) -> Tuple[List[str], Dict[str, Any]]:
-        texts = []
+        texts, finish_reasons = [], []
         for _ in range(n):
+            index = len(self.calls)
             texts.append(self._respond(spec.key, messages))
+            finish_reasons.append(self.finish_reason(spec.key, index) if callable(self.finish_reason)
+                                  else self.finish_reason)
             self.calls.append({"model_key": spec.key, "messages": copy.deepcopy(messages),
                                "temperature": temperature, "top_p": top_p, "max_tokens": max_tokens,
                                "seed": seed})
-        return texts, {}
+        return texts, {"finish_reasons": finish_reasons}
 
     def verdict_probs(self, model_key: str, messages: List[Dict[str, str]], completion: str,
                       *, marker: str = "VERDICT:") -> Dict[str, Any]:

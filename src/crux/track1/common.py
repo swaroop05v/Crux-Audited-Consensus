@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from crux.backends import Backend, BackendError, Registry, get_backend
 from crux.backends.fake import FakeBackend
@@ -65,18 +66,62 @@ def make_backend(name: str, registry: Registry, fake_responder: Any) -> Backend:
     return get_backend(registry, name)
 
 
-def safe_chat(backend: Backend, model_key: str, messages: List[Dict[str, str]],
-              **kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str]]:
-    """One completion as (text, params, call_error). A failed call is recorded, never treated as model output."""
+@dataclass
+class CallOutcome:
+    """One completion. A failed call is recorded, never treated as model output."""
+
+    text: Optional[str]
+    params: Optional[Dict[str, Any]]
+    call_error: Optional[str]
+    finish_reason: Optional[str]
+
+    @property
+    def truncated(self) -> bool:
+        return self.finish_reason == "length"
+
+    def fields(self) -> Dict[str, Any]:
+        """Per-output fields every Track 1 record stores."""
+        return {"raw_output": self.text, "call_error": self.call_error, "finish_reason": self.finish_reason}
+
+
+def safe_chat(backend: Backend, model_key: str, messages: List[Dict[str, str]], **kwargs: Any) -> CallOutcome:
     try:
         result = backend.chat(model_key, messages, **kwargs)
     except BackendError as exc:
-        return None, None, str(exc)
-    return result.text, result.params, None
+        return CallOutcome(None, None, str(exc), None)
+    return CallOutcome(result.text, result.params, None, result.finish_reason)
 
 
-def params_without_seed(params: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Call params shared by all calls of a stage; per-call seeds are stored with each output."""
+# Exactly one per failed output, checked in this order: the call failed; the reply was cut off at max_tokens
+# (never parsed, even if a prefix happens to be valid JSON); the reply was complete but did not parse.
+FAILURE_TYPES = ("call_error", "truncated", "parse_error")
+
+
+def parse_outcome(outcome: CallOutcome, parse: Callable[[Optional[str]], Dict[str, Any]],
+                  empty: Dict[str, Any]) -> Dict[str, Any]:
+    """``parse(text)`` returns a dict with ``parse_ok``/``parse_error``; ``empty`` holds the fields to null out
+    when there is nothing to parse. Adds ``failure_type``."""
+    if outcome.call_error is not None:
+        return {**empty, "parse_ok": False, "parse_error": "call failed", "failure_type": "call_error"}
+    if outcome.truncated:
+        return {**empty, "parse_ok": False, "parse_error": "truncated at max_tokens", "failure_type": "truncated"}
+    parsed = parse(outcome.text)
+    return {**parsed, "failure_type": None if parsed["parse_ok"] else "parse_error"}
+
+
+def failure_summary(outputs: List[Dict[str, Any]]) -> str:
+    """Counts such as "38 ok, 0 call_error, 1 truncated, 1 parse_error", for stage logs."""
+    counts = {kind: sum(o.get("failure_type") == kind for o in outputs) for kind in FAILURE_TYPES}
+    ok = sum(o.get("failure_type") is None for o in outputs)
+    return ", ".join([f"{ok} ok"] + [f"{n} {kind}" for kind, n in counts.items()])
+
+
+_PER_CALL_KEYS = ("seed", "seeds", "finish_reasons", "truncated", "usage")
+
+
+def shared_call_params(params: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Call params common to all calls of a stage. Per-call values (seed, finish reason, token usage) are
+    stored with each output instead."""
     if params is None:
         return None
-    return {key: value for key, value in params.items() if key not in ("seed", "seeds")}
+    return {key: value for key, value in params.items() if key not in _PER_CALL_KEYS}

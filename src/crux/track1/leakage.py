@@ -7,7 +7,9 @@
 - P5 flags (multi-clause, deictic/meta-reference): logged only, never used to filter (decisions D1).
 - L2 restatement probe (Prompt 1C, P4): run by both consultants at T=0; leaky if either says YES. Optional.
 
-``is_leaky`` = L1 flagged, or L2 ran and flagged. Leaky cruxes are kept in the file (Track 4 reports their d).
+``is_leaky`` = L1 flagged, or L2 ran and flagged. If both probe replies are unusable (call error, truncated, or
+no RESTATES line), ``is_leaky`` falls back to L1 and ``leak_probe_failed`` is true. Leaky cruxes are kept in the
+file (Track 4 reports their d).
 """
 
 from __future__ import annotations
@@ -21,8 +23,8 @@ from crux.io import index_by_id, read_jsonl, stage_meta, write_jsonl
 from crux.prompts import Prompt, load_prompt
 from crux.schema import SCHEMA_VERSION
 from crux.seeding import stable_seed
-from crux.track1.common import (CONSULTANT_ROLES, load_cases, make_backend, params_without_seed, run_path,
-                                safe_chat)
+from crux.track1.common import (CONSULTANT_ROLES, load_cases, make_backend, parse_outcome, run_path, safe_chat,
+                                shared_call_params)
 from crux.track1.quantities import Quantity, comparable, extract_quantities, relative_difference
 
 STAGE = "leakage"
@@ -140,15 +142,22 @@ def l2_probe(claim: str, case: Dict[str, Any], backend: Backend, registry: Regis
     by_consultant, calls = {}, {}
     for role in CONSULTANT_ROLES:
         call_seed = stable_seed(seed, STAGE, crux_id, role)
-        text, params, call_error = safe_chat(backend, role, messages, **registry.sampling("leak_probe"),
-                                             max_tokens=max_tokens, seed=call_seed)
-        restates = parse_restates(text)
-        by_consultant[role] = {"restates": restates, "parse_ok": restates is not None, "raw_output": text,
-                               "call_error": call_error, "seed": call_seed}
-        calls[role] = params_without_seed(params)
+        outcome = safe_chat(backend, role, messages, **registry.sampling("leak_probe"), max_tokens=max_tokens,
+                            seed=call_seed)
+        parsed = parse_outcome(outcome, _parse_probe, {"restates": None})
+        by_consultant[role] = {**parsed, **outcome.fields(), "seed": call_seed}
+        calls[role] = shared_call_params(outcome.params)
     verdicts = [entry["restates"] for entry in by_consultant.values()]
+    # Leaky if either consultant says YES (P4); clean only if both answered NO; otherwise undetermined.
     flagged = True if True in verdicts else (False if None not in verdicts else None)
-    return {"flagged": flagged, "by_consultant": by_consultant, "calls": calls, **prompt.meta()}
+    return {"flagged": flagged, "all_failed": all(v is None for v in verdicts), "by_consultant": by_consultant,
+            "calls": calls, **prompt.meta()}
+
+
+def _parse_probe(text: Optional[str]) -> Dict[str, Any]:
+    restates = parse_restates(text)
+    return {"restates": restates, "parse_ok": restates is not None,
+            "parse_error": None if restates is not None else "no 'RESTATES: YES|NO' line"}
 
 
 def check(proposals: List[Dict[str, Any]], cases_by_id: Dict[str, Dict[str, Any]], *,
@@ -167,7 +176,8 @@ def check(proposals: List[Dict[str, Any]], cases_by_id: Dict[str, Dict[str, Any]
                   "crux_id": proposal["crux_id"], "proposed_by": proposal["proposed_by"]}
         claim = proposal.get("crux_claim")
         if not proposal.get("parse_ok") or not claim:
-            records.append({**record, "status": "no_claim", "is_leaky": None, "meta": meta})
+            records.append({**record, "status": "no_claim", "leak_probe_failed": None, "is_leaky": None,
+                            "meta": meta})
             continue
         case = cases_by_id[proposal["id"]]
         l1 = l1_check(claim, case["choices"], overlap_threshold=overlap_threshold, rel_tol=rel_tol)
@@ -175,6 +185,8 @@ def check(proposals: List[Dict[str, Any]], cases_by_id: Dict[str, Dict[str, Any]
                        max_tokens=probe_max_tokens, seed=seed) if run_l2 else None)
         records.append({**record, "status": "checked", "crux_claim": claim, "l1": l1, "l2": l2,
                         "p5_flags": p5_flags(claim),
+                        # If both probe replies are unusable, fall back to L1 and mark it so it can be counted.
+                        "leak_probe_failed": l2["all_failed"] if l2 else None,
                         "is_leaky": l1["flagged"] or bool(l2 and l2["flagged"]), "meta": meta})
     return records
 

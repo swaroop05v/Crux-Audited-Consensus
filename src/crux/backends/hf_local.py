@@ -127,7 +127,11 @@ class HFLocalBackend(Backend):
             output = model.generate(**inputs, **kwargs)
         new_tokens = output[:, inputs["input_ids"].shape[1]:]
         texts = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
-        return texts, self._versions(model)
+        eos_ids = model.generation_config.eos_token_id
+        eos_ids = set(eos_ids if isinstance(eos_ids, list) else [eos_ids]) - {None}
+        # Same vocabulary as the OpenAI API: "stop" if an end-of-sequence token was produced, else "length".
+        finish_reasons = ["stop" if eos_ids & set(row.tolist()) else "length" for row in new_tokens]
+        return texts, {**self._versions(model), "finish_reasons": finish_reasons}
 
     def verdict_probs(self, model_key: str, messages: List[Dict[str, str]], completion: str,
                       *, marker: str = "VERDICT:") -> Dict[str, Any]:

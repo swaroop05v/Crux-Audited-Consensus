@@ -17,9 +17,10 @@ from crux.prompts import Prompt, load_prompt
 from crux.schema import SCHEMA_VERSION
 from crux.seeding import stable_seed
 from crux.track1.common import (CONSULTANT_ROLES, format_reasoning, load_cases, make_backend, other_role,
-                                parse_json_object, run_path, safe_chat, side)
+                                failure_summary, parse_json_object, parse_outcome, run_path, safe_chat, side)
 
 STAGE = "crux_proposals"
+EMPTY_PROPOSAL = {"crux_claim": None, "disagreement_analysis": None, "proposer_own_verdict": None}
 PROMPT_NAME = "crux_proposal"
 DEFAULT_PROMPT_VERSION = "v2"
 DEFAULT_MAX_TOKENS = 1024
@@ -75,11 +76,9 @@ def propose(cases: List[Dict[str, Any]], backend: Backend, registry: Registry, *
     for case in cases:
         for role in CONSULTANT_ROLES:
             call_seed = stable_seed(seed, STAGE, case["id"], role)
-            text, params, call_error = safe_chat(backend, role, proposal_messages(case, role, prompt),
-                                                 **sampling, max_tokens=max_tokens, seed=call_seed)
-            parsed = parse_proposal(text) if call_error is None else {
-                "parse_ok": False, "parse_error": "call failed", "crux_claim": None,
-                "disagreement_analysis": None, "proposer_own_verdict": None}
+            outcome = safe_chat(backend, role, proposal_messages(case, role, prompt), **sampling,
+                                max_tokens=max_tokens, seed=call_seed)
+            parsed = parse_outcome(outcome, parse_proposal, EMPTY_PROPOSAL)
             records.append({
                 "schema_version": SCHEMA_VERSION,
                 "stage": STAGE,
@@ -87,10 +86,9 @@ def propose(cases: List[Dict[str, Any]], backend: Backend, registry: Registry, *
                 "crux_id": f"{case['id']}#{side(role)}",
                 "proposed_by": role,
                 **parsed,
-                "raw_output": text,
-                "call_error": call_error,
+                **outcome.fields(),
                 "seed": call_seed,
-                "meta": stage_meta(STAGE, **prompt.meta(), call=params,
+                "meta": stage_meta(STAGE, **prompt.meta(), call=outcome.params,
                                    params={"max_tokens": max_tokens, "base_seed": seed}),
             })
     return records
@@ -116,6 +114,5 @@ def run_stage(*, cases_path: Path, run: str, backend_name: str, prompt_version: 
         record["meta"]["inputs"] = {"cases": str(cases_path)}
     out = run_path(run, STAGE)
     write_jsonl(out, records, STAGE)
-    ok = sum(record["parse_ok"] for record in records)
-    print(f"{STAGE}: wrote {len(records)} records to {out} ({ok} parsed, {len(records) - ok} failed)")
+    print(f"{STAGE}: wrote {len(records)} records to {out} ({failure_summary(records)})")
     return out
