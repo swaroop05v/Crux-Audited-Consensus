@@ -95,3 +95,25 @@ choice parsing, answer-revealing fields).
 - **`reasoning` is a list of steps**, as in the base data and `run.py`. Doc 2 shows a single string.
 - **The first stage is named `cases`.** It holds question, choices, both consultants' initial answers, and `eval`.
   Track 3's 8B runs write the same stage.
+
+## D10. Revised selection gate for the kill test
+
+**Status: Adopted**
+
+1. **Candidate eligibility:** A candidate must be successfully parsed, not leaky, have decisiveness `d > 0`, and have agreeing verdicts from both judge layers. A candidate whose judge layers disagree is excluded; it does not independently block the case.
+
+2. **No eligible candidates:** Abstain from the crux route. Record the applicable reason: `no_candidates`, `all_leaky`, `d_zero`, or `layers_disagree`.
+
+3. **P1 unilateral-veto handling:** P1 remains provisional pending the veto-rate report on `seed_30`. Implement `p1_mode = "flag" | "abstain"`, defaulting to `"flag"`. In flag mode, log a unilateral veto and continue evaluating the remaining candidates. Always record what the abstain mode would have done for comparison.
+
+4. **P2 candidate consistency:** If two candidates are eligible and their mapped answers differ, abstain with `candidates_disagree`. If their mappings agree, or only one candidate is eligible, use the eligible mapping.
+
+5. **Selected crux:** Select the eligible candidate with the highest `d`. Break ties using the higher mapping-agreement rate, then `crux_id` order. Never use checkability `c` as a selection tie-break.
+
+6. **Scoring and threshold:** The score is `d * c` for the selected crux. The checkability signal (`c_cons`, `c_prob`, or `c_2judge`) is a configuration choice to be made using Kill Criterion 2 results on the dev split. Fit a single threshold `tau` on the dev split only.
+
+7. **Final answer:** If `score >= tau`, return the crux-mapped answer with `final_source = "crux"`. Otherwise, abstain from the crux route so the end-to-end system falls back to DR's consensus.
+
+8. **Additional audit fields:** For every case, record whether the crux answer confirms or overturns DR's consensus. Also record `p2_alt_answer`: the answer the highest-`d` candidate alone would have produced when P2 causes abstention. These fields support analysis of relaxing P2 and testing a separate overturn threshold on dev without rerunning the cases.
+
+**Rationale:** This revision removes the vulnerable checkability tie-break, makes P1's provisional status explicit, and preserves information needed to evaluate alternative gate policies without rerunning the model pipeline.
