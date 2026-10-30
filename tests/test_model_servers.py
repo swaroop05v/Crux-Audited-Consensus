@@ -129,4 +129,5 @@ def main():
     print("\nOne or more tests failed.")
     return 1
 
-main()
+if __name__ == "__main__":
+    sys.exit(main())
