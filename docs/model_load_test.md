@@ -161,3 +161,17 @@ Qwen3-8B-AWQ and Llama 3.1-8B-Instruct-AWQ-INT4 were successfully loaded on sepa
 Both servers became healthy simultaneously, and both chat-completion APIs returned HTTP 200 responses while both models were running. The GPU memory snapshot also showed approximately 13.3 GiB allocated on each GPU.
 
 The core model-loading and simultaneous API smoke test passed. The remaining follow-up is to configure and verify Qwen's intended thinking-disabled chat-template behavior.
+
+## 11. Test Evidence
+
+### Simultaneous API Testing
+
+Both model servers returned HTTP 200 responses during simultaneous operation.
+
+![Simultaneous API Test](images/simultaneous_api_test.png)
+
+### GPU Memory Utilization
+
+The following snapshot shows GPU memory allocation on both Tesla T4 GPUs while both vLLM servers were running.
+
+![GPU Memory Usage](images/gpu_memory_usage.png)
