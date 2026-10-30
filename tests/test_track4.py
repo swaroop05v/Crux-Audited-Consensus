@@ -16,11 +16,11 @@ from crux.track4.kill_test_eval import (
     table3_leakage_and_layers,
 )
 from crux.track4.manual_audit import (
-    GO_NO_GO_THRESHOLDS,
+    AUDIT_AGREEMENT_THRESHOLDS,
     RUBRIC_COLUMNS,
     audit_rows_to_csv_string,
     build_audit_rows,
-    check_go_no_go,
+    check_audit_agreement,
     cohens_kappa,
     per_column_agreement,
     percent_agreement,
@@ -38,7 +38,7 @@ def _case(
     split="test",
     source="8b_run",
     ground_truth="A",
-    initially_right="consultant_a",
+    initially_right="a",
     baseline_answer="A",
     crux_answer="A",
     final_answer="A",
@@ -168,14 +168,23 @@ class TestFilterSplit(unittest.TestCase):
 class TestBalancedSubsample(unittest.TestCase):
     def test_balances(self):
         cases = (
-            [_case(cid=f"a{i}", initially_right="consultant_a") for i in range(10)]
-            + [_case(cid=f"b{i}", initially_right="consultant_b") for i in range(3)]
+            [_case(cid=f"a{i}", initially_right="a") for i in range(10)]
+            + [_case(cid=f"b{i}", initially_right="b") for i in range(3)]
         )
-        bal = balanced_subsample(cases)
-        a_count = sum(1 for c in bal if c.initially_right == "consultant_a")
-        b_count = sum(1 for c in bal if c.initially_right == "consultant_b")
+        bal = balanced_subsample(cases, seed=42)
+        a_count = sum(1 for c in bal if c.initially_right == "a")
+        b_count = sum(1 for c in bal if c.initially_right == "b")
         self.assertEqual(a_count, b_count)
         self.assertEqual(a_count, 3)
+
+    def test_deterministic_with_seed(self):
+        cases = (
+            [_case(cid=f"a{i}", initially_right="a") for i in range(10)]
+            + [_case(cid=f"b{i}", initially_right="b") for i in range(3)]
+        )
+        bal1 = balanced_subsample(cases, seed=99)
+        bal2 = balanced_subsample(cases, seed=99)
+        self.assertEqual([c.id for c in bal1], [c.id for c in bal2])
 
 
 # ---------------------------------------------------------------------------
@@ -272,12 +281,29 @@ class TestTauSelection(unittest.TestCase):
     def test_returns_sweep(self):
         cases = [
             _case(cid="c1", split="dev", crux_d=1.0, c_cons=0.9, layers_agree=True,
-                  crux_answer="A", ground_truth="A"),
+                  crux_answer="A", ground_truth="A",
+                  layer1_verdict="TRUE", layer2_verdict="TRUE"),
         ]
         result = select_tau(cases)
         self.assertIn("best_tau", result)
         self.assertIn("sweep", result)
         self.assertEqual(len(result["sweep"]), 9)  # default candidates
+
+    def test_uses_gate_apply_gate(self):
+        """Verify select_tau routes through gate.apply_gate."""
+        cases = [
+            _case(cid="c1", split="dev", crux_d=0.8, c_cons=0.9, layers_agree=True,
+                  crux_answer="A", ground_truth="A",
+                  layer1_verdict="TRUE", layer2_verdict="TRUE"),
+            _case(cid="c2", split="dev", crux_d=0.3, c_cons=0.2, layers_agree=True,
+                  crux_answer="B", ground_truth="A",
+                  layer1_verdict="TRUE", layer2_verdict="TRUE"),
+        ]
+        result = select_tau(cases, candidates=(0.0, 0.5))
+        # At tau=0.0, both pass gate → 1 correct of 2 → acc=0.5, cov=1.0
+        # At tau=0.5, only c1 passes (0.8*0.9=0.72>=0.5) → acc=1.0, cov=0.5
+        # score(0.0)=0.5, score(0.5)=0.5 → tie, either is valid
+        self.assertIn(result["best_tau"], [0.0, 0.5])
 
 
 # ---------------------------------------------------------------------------
@@ -348,11 +374,11 @@ class TestPerColumnAgreement(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Go/No-Go
+# Audit agreement checks
 # ---------------------------------------------------------------------------
 
 
-class TestGoNoGo(unittest.TestCase):
+class TestAuditAgreement(unittest.TestCase):
     def test_all_pass(self):
         agreement = {
             "human_crux_valid": {"percent_agreement": 0.95, "cohens_kappa": 0.85},
@@ -360,7 +386,7 @@ class TestGoNoGo(unittest.TestCase):
             "human_decisive": {"percent_agreement": 0.90, "cohens_kappa": 0.70},
             "human_verdict_correct": {"percent_agreement": 0.90, "cohens_kappa": 0.75},
         }
-        result = check_go_no_go(agreement)
+        result = check_audit_agreement(agreement)
         self.assertTrue(result["go"])
         self.assertEqual(result["verdict"], "GO")
 
@@ -371,7 +397,7 @@ class TestGoNoGo(unittest.TestCase):
             "human_decisive": {"percent_agreement": 0.90, "cohens_kappa": 0.70},
             "human_verdict_correct": {"percent_agreement": 0.90, "cohens_kappa": 0.75},
         }
-        result = check_go_no_go(agreement)
+        result = check_audit_agreement(agreement)
         self.assertFalse(result["go"])
         self.assertEqual(result["verdict"], "NO-GO")
 

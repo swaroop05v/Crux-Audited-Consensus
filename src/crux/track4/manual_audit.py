@@ -276,14 +276,14 @@ def per_column_agreement(
 
 
 # ---------------------------------------------------------------------------
-# Go/No-Go threshold skeleton
+# Audit agreement thresholds (inter-rater reliability checks)
 # ---------------------------------------------------------------------------
 
-# These thresholds are written *before* the 300-case test run (CLAUDE.md rule).
-# They define the minimum agreement levels required to trust the automated
-# pipeline and proceed with the full evaluation.
+# These thresholds define the minimum inter-rater agreement levels required
+# to trust the 50-sample manual audit annotations.  They are NOT the kill-
+# criteria go/no-go thresholds (those live in README.md per CLAUDE.md rules).
 
-GO_NO_GO_THRESHOLDS = {
+AUDIT_AGREEMENT_THRESHOLDS = {
     "human_crux_valid": {
         "min_kappa": 0.6,
         "min_percent_agreement": 0.80,
@@ -307,16 +307,16 @@ GO_NO_GO_THRESHOLDS = {
 }
 
 
-def check_go_no_go(
+def check_audit_agreement(
     agreement_results: Dict[str, Dict[str, float]],
     thresholds: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Check whether inter-rater agreement meets go/no-go thresholds.
+    """Check whether inter-rater agreement meets audit agreement thresholds.
 
     Returns a dict with per-column pass/fail and an overall verdict.
     """
     if thresholds is None:
-        thresholds = GO_NO_GO_THRESHOLDS
+        thresholds = AUDIT_AGREEMENT_THRESHOLDS
 
     column_results: Dict[str, Dict[str, Any]] = {}
     all_pass = True
@@ -349,3 +349,8 @@ def check_go_no_go(
         "go": all_pass,
         "verdict": "GO" if all_pass else "NO-GO",
     }
+
+
+# Backward-compatible aliases (deprecated — use the new names)
+GO_NO_GO_THRESHOLDS = AUDIT_AGREEMENT_THRESHOLDS
+check_go_no_go = check_audit_agreement

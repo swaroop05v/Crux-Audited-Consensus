@@ -38,7 +38,7 @@ class CaseRecord:
 
     # Ground truth (from eval block — only Track 4 reads this)
     ground_truth: Optional[str] = None
-    initially_right: Optional[str] = None  # "consultant_a" or "consultant_b"
+    initially_right: Optional[str] = None  # "a" or "b" (matches eval block schema)
 
     # Base DR fields
     dr_agreed: Optional[bool] = None
@@ -115,22 +115,35 @@ def filter_split(cases: Sequence[CaseRecord], split: str) -> List[CaseRecord]:
     return [c for c in cases if c.split == split and c.is_kill_test]
 
 
-def balanced_subsample(cases: Sequence[CaseRecord]) -> List[CaseRecord]:
+def balanced_subsample(
+    cases: Sequence[CaseRecord], seed: int = 42
+) -> List[CaseRecord]:
     """Build a balanced subsample where each consultant is initially right ~50%.
 
     Follows the paper's Appendix C.2: keep all minority-class cases,
     randomly sample the same count from the majority class.
+
+    Parameters
+    ----------
+    cases : sequence of CaseRecord
+    seed : int
+        Fixed RNG seed for reproducibility (logged in the return value
+        when called via the notebook).
     """
+    import logging
     import random
 
-    a_right = [c for c in cases if c.initially_right == "consultant_a"]
-    b_right = [c for c in cases if c.initially_right == "consultant_b"]
+    rng = random.Random(seed)
+    logging.getLogger(__name__).info("balanced_subsample: seed=%d", seed)
+
+    a_right = [c for c in cases if c.initially_right == "a"]
+    b_right = [c for c in cases if c.initially_right == "b"]
 
     minority_n = min(len(a_right), len(b_right))
     if len(a_right) <= len(b_right):
-        sampled = a_right + random.sample(b_right, minority_n)
+        sampled = a_right + rng.sample(b_right, minority_n)
     else:
-        sampled = random.sample(a_right, minority_n) + b_right
+        sampled = rng.sample(a_right, minority_n) + b_right
     return sampled
 
 
@@ -578,13 +591,31 @@ def select_tau(
     dev_cases: Sequence[CaseRecord],
     c_signal: str = "c_cons",
     candidates: Sequence[float] = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8),
+    case_candidates: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Choose tau on the dev split that maximises gated accuracy * coverage.
 
+    Uses ``gate.apply_gate`` for each candidate tau so that P1, P2, and all
+    eligibility checks (layers agree, d > 0, leakage, veto) are applied
+    consistently with the production gate.
+
+    Parameters
+    ----------
+    dev_cases : sequence of CaseRecord
+        Dev-split cases (with ground truth).
+    c_signal : str
+        Which checkability signal to use (c_cons, c_prob, c_2judge).
+    candidates : sequence of float
+        Tau values to sweep.
+    case_candidates : dict mapping case id -> list of candidate dicts
+        Pre-built candidate dicts (as expected by ``gate.apply_gate``) for
+        each case.  If ``None``, a single-candidate list is synthesised from
+        each CaseRecord's fields (backward-compatible, but less accurate
+        because P1/P2 details may be missing).
+
     Returns the best tau, its accuracy, coverage, and the full sweep.
     """
-    def _get_c(case: CaseRecord) -> Optional[float]:
-        return getattr(case, c_signal, None)
+    from crux.gate import apply_gate
 
     sweep: List[Dict[str, Any]] = []
     for tau in candidates:
@@ -596,17 +627,29 @@ def select_tau(
                 continue
             n_total += 1
 
-            d = c.crux_d
-            cv = _get_c(c)
-            if (
-                d is not None
-                and cv is not None
-                and c.layers_agree
-                and d * cv >= tau
-                and c.crux_audited_answer is not None
-            ):
+            # Build or look up the candidate list for this case
+            if case_candidates is not None and c.id in case_candidates:
+                cands = case_candidates[c.id]
+            else:
+                # Synthesise a single-candidate dict from CaseRecord fields
+                if c.selected_crux_id is None or c.crux_d is None:
+                    continue
+                cands = [_case_record_to_candidate(c, c_signal)]
+
+            if not cands:
+                continue
+
+            gate_result = apply_gate(
+                cands,
+                tau=tau,
+                c_signal=c_signal,
+                dr_consensus_answer=c.dr_consensus_answer,
+                dr_judge_answer=c.dr_judge_answer,
+            )
+
+            if gate_result["selection_reason"] == "selected":
                 n_answered += 1
-                if c.crux_audited_answer == c.ground_truth:
+                if gate_result["final_answer"] == c.ground_truth:
                     n_correct += 1
 
         acc = n_correct / n_answered if n_answered > 0 else 0.0
@@ -623,6 +666,36 @@ def select_tau(
 
     best = max(sweep, key=lambda x: x["score"])
     return {"best_tau": best["tau"], "best": best, "sweep": sweep, "c_signal": c_signal}
+
+
+def _case_record_to_candidate(case: CaseRecord, c_signal: str) -> Dict[str, Any]:
+    """Build a gate-compatible candidate dict from a CaseRecord.
+
+    This is a fallback for when pre-built candidate dicts are not available.
+    """
+    layer_verdicts: Dict[str, str] = {}
+    if case.layer1_verdict is not None:
+        layer_verdicts["judge_l1_qwen"] = case.layer1_verdict
+    if case.layer2_verdict is not None:
+        layer_verdicts["judge_l2_llama"] = case.layer2_verdict
+    # Ensure at least two entries so _layers_agree can work
+    if len(layer_verdicts) < 2:
+        layer_verdicts.setdefault("judge_l1_qwen", "TRUE")
+        layer_verdicts.setdefault("judge_l2_llama", "TRUE")
+
+    return {
+        "crux_id": case.selected_crux_id or case.id,
+        "parsed": True,
+        "leaky": bool(case.is_leaky),
+        "d": case.crux_d if case.crux_d is not None else 0.0,
+        "veto_flag": False,
+        "mapped_answer": case.crux_audited_answer,
+        "mapping_agreement_rate": 1.0,
+        "layer_verdicts": layer_verdicts,
+        "c_cons": case.c_cons if case.c_cons is not None else 0.0,
+        "c_prob": case.c_prob if case.c_prob is not None else 0.0,
+        "c_2judge": case.c_2judge if case.c_2judge is not None else 0.0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -655,3 +728,110 @@ def summary_stats(cases: Sequence[CaseRecord]) -> Dict[str, Any]:
         "n_crux_selected": n_selected,
         "n_abstained": n_abstained,
     }
+
+
+# ---------------------------------------------------------------------------
+# Stage-file loader
+# ---------------------------------------------------------------------------
+
+
+def load_case_records(
+    data_dir: str,
+    *,
+    cases_file: str = "cases.jsonl",
+    crux_proposals_file: str = "crux_proposals.jsonl",
+    leakage_file: str = "leakage.jsonl",
+    decisiveness_file: str = "decisiveness.jsonl",
+) -> List[CaseRecord]:
+    """Build ``CaseRecord`` objects by joining all four stage files.
+
+    Reads via ``crux.io.read_jsonl`` with ``with_labels=True`` so that the
+    eval block (ground_truth, initially_right) is available for Track 4.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory containing the stage JSONL files.
+    cases_file, crux_proposals_file, leakage_file, decisiveness_file : str
+        File names within ``data_dir`` (defaults follow the pipeline naming).
+
+    Returns
+    -------
+    list of CaseRecord
+    """
+    from pathlib import Path
+
+    from crux.io import index_by_id, read_jsonl
+
+    base = Path(data_dir)
+
+    # Load stage files (with_labels=True for Track 4 eval access)
+    cases_raw = read_jsonl(base / cases_file, "cases", with_labels=True)
+    crux_raw = read_jsonl(base / crux_proposals_file, "crux_proposals", with_labels=True) if (base / crux_proposals_file).exists() else []
+    leak_raw = read_jsonl(base / leakage_file, "leakage", with_labels=True) if (base / leakage_file).exists() else []
+    dec_raw = read_jsonl(base / decisiveness_file, "decisiveness", with_labels=True) if (base / decisiveness_file).exists() else []
+
+    # Index auxiliary files by crux_id for joining
+    crux_index = index_by_id(crux_raw, key="crux_id") if crux_raw else {}
+    leak_index = index_by_id(leak_raw, key="crux_id") if leak_raw else {}
+    dec_index = index_by_id(dec_raw, key="crux_id") if dec_raw else {}
+
+    records: List[CaseRecord] = []
+    for case in cases_raw:
+        case_id = case["id"]
+        ev = case.get("eval", {})
+
+        rec = CaseRecord(
+            id=case_id,
+            dataset=case.get("dataset", ""),
+            source=case.get("source", ""),
+            split=case.get("split", ""),
+            consultant_a_answer=case.get("consultant_a_answer"),
+            consultant_b_answer=case.get("consultant_b_answer"),
+            ground_truth=ev.get("ground_truth"),
+            initially_right=ev.get("initially_right"),
+            dr_agreed=case.get("dr_agreed"),
+            dr_consensus_answer=case.get("dr_consensus_answer"),
+            dr_judge_answer=case.get("dr_judge_answer"),
+            dr_turns_used=case.get("dr_turns_used"),
+            is_agreement_trap=case.get("is_agreement_trap"),
+        )
+
+        # Join gate/decisiveness output (stored under case_id or as crux_id prefix)
+        gate = case.get("gate", {})
+        rec.selected_crux_id = gate.get("selected_crux_id")
+        rec.selection_reason = gate.get("selection_reason")
+        rec.crux_score = gate.get("crux_score")
+        rec.final_answer = gate.get("final_answer")
+        rec.final_source = gate.get("final_source")
+
+        # If a crux was selected, pull its proposal + leakage + decisiveness
+        if rec.selected_crux_id:
+            crux = crux_index.get(rec.selected_crux_id, {})
+            rec.crux_claim = crux.get("crux_claim")
+
+            leak = leak_index.get(rec.selected_crux_id, {})
+            rec.is_leaky = leak.get("is_leaky", leak.get("leaky"))
+
+            dec = dec_index.get(rec.selected_crux_id, {})
+            rec.crux_d = dec.get("d")
+            rec.layer1_verdict = (dec.get("layer_verdicts") or {}).get("judge_l1_qwen")
+            rec.layer2_verdict = (dec.get("layer_verdicts") or {}).get("judge_l2_llama")
+            rec.layer2_same_family_verdict = (dec.get("layer_verdicts") or {}).get("judge_l2_gemma")
+            verdicts = dec.get("layer_verdicts", {})
+            if verdicts:
+                vals = list(verdicts.values())
+                rec.layers_agree = len(vals) >= 2 and len(set(vals)) == 1
+            rec.c_cons = dec.get("c_cons")
+            rec.c_prob = dec.get("c_prob")
+            rec.c_2judge = dec.get("c_2judge")
+            rec.crux_audited_answer = dec.get("mapped_answer") or gate.get("selected_mapping")
+
+        # Baseline and ablation answers (may be stored in the case record)
+        rec.baseline_full_q_answer = case.get("baseline_full_q_answer")
+        rec.ablation_q_plus_crux_answer = case.get("ablation_q_plus_crux_answer")
+        rec.stronger_consultant_answer = case.get("stronger_consultant_answer")
+
+        records.append(rec)
+
+    return records
