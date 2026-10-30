@@ -68,6 +68,14 @@ class PromptRenderTest(unittest.TestCase):
         with self.assertRaises(PromptError):
             prompt.render(crux_claim="x", question="extra")
 
+    def test_v3_proposal_asks_for_two_way_crux_with_same_fields(self):
+        v2, v3 = load_prompt("crux_proposal", "v2"), load_prompt("crux_proposal", "v3")
+        self.assertEqual(v3.placeholders, v2.placeholders)
+        user = v3.messages(**{name: f"<{name}>" for name in v3.placeholders})[1]["content"]
+        self.assertIn("must work in BOTH directions", user)
+        self.assertIn("6. TWO-WAY", user)
+        self.assertIn('"own_verdict"', user)
+
     def test_unknown_prompt(self):
         with self.assertRaises(PromptError):
             load_prompt("does_not_exist")

@@ -276,6 +276,12 @@ def validate_decisiveness(record: Dict[str, Any]) -> List[str]:
         value = record.get(key)
         if not isinstance(value, (int, float)) or not 0 <= value <= 1:
             errors.append(f"{key}: must be a number in [0, 1]")
+    # Per-branch evidence: optional, since files written before it existed lack it until `crux track1 rescore`.
+    for key in ("d_true", "d_false", "flip_rate_a_true", "flip_rate_a_false", "flip_rate_b_true",
+                "flip_rate_b_false"):
+        value = record.get(key)
+        if value is not None and (not isinstance(value, (int, float)) or not 0 <= value <= 1):
+            errors.append(f"{key}: must be a number in [0, 1]")
     _check_mapping(record.get("agreed_mapping"), "agreed_mapping", errors)
     if not isinstance(record.get("veto_flag"), bool):
         errors.append("veto_flag: must be a bool")

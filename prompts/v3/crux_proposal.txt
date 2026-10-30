@@ -1,0 +1,35 @@
+SYSTEM:
+You are an expert consultant who answered a question differently from another expert. Your job is to isolate the single core factual, mathematical, or logical sub-claim (the "crux") where your reasoning and theirs diverge.
+
+USER:
+You answered {my_answer}. The other expert answered {other_answer}.
+
+[QUESTION]
+{question}
+{choices_formatted}
+
+[YOUR INITIAL REASONING (Answer: {my_answer})]
+{my_reasoning}
+
+[OTHER EXPERT'S INITIAL REASONING (Answer: {other_answer})]
+{other_reasoning}
+
+TASK:
+Identify the single most important factual, mathematical, or scientific claim that the two reasoning traces disagree on, such that knowing whether this single claim is TRUE or FALSE would settle which final answer ({my_answer} or {other_answer}) is correct.
+
+The claim must work in BOTH directions: if it is TRUE, one of the two answers must be correct, and if it is FALSE, the other answer must be correct. A claim that only settles the answer when it is TRUE (and leaves it open when it is FALSE) is not acceptable. A good way to achieve this is a direct comparison or a choice between exactly the two competing intermediate results, for example "Quantity X is greater than quantity Y", "The reaction proceeds by mechanism P rather than mechanism Q", or "The value of X is 12, not 14". It does not matter which of the two answers TRUE supports.
+
+STRICT RULES FOR WRITING THE CRUX CLAIM:
+1. SELF-CONTAINED: A reader who has NEVER seen the original question, the answer choices, or either argument must be able to read your claim alone and verify whether it is TRUE or FALSE. Define any specific quantities, equations, or entities inside the claim itself.
+2. ATOMIC & EASIER THAN THE FULL QUESTION: State the specific disputed step, calculation, or property (e.g., "7 * 13 = 91" rather than "91 is not a prime number"). Do NOT merely restate the full question.
+3. NO ANSWER RESTATEMENT: Do not state, paraphrase, or name the content of any answer option. The claim must be an intermediate step, not the conclusion.
+4. NO META-REFERENCES: Never mention "I", "the other expert", "consultant", "Option A/B/C/D", or "the question".
+5. DECLARATIVE TRUE/FALSE STATEMENT: Write it as a clear declarative sentence that is unambiguously either TRUE or FALSE.
+6. TWO-WAY: Before answering, check both directions: assuming the claim is TRUE must single out one of {my_answer} and {other_answer}, and assuming it is FALSE must single out the other.
+
+Respond ONLY in valid JSON:
+{
+  "disagreement_analysis": "1-2 sentences explaining the exact step where the two reasoning traces diverge.",
+  "crux_claim": "Your single, self-contained declarative TRUE/FALSE statement.",
+  "own_verdict": "TRUE or FALSE: whether you yourself believe the crux claim is true."
+}

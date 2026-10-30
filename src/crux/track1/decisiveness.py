@@ -15,6 +15,8 @@ Per-consultant samples are stored as they came back (not pre-paired). From them:
 - P1 ``veto_flag``: exactly one consultant is decisive on a majority of samples (flip rate >= ``veto_threshold``),
   so that consultant alone sinks d. ``vetoed_by`` names the other one. Provisional: flag only (decisions D1).
 - ``mapping_conflict``: both are decisive but their majority mappings disagree.
+- per-branch evidence (``d_true``, ``d_false``, ``flip_rate_{a,b}_{true,false}``): see ``branch_summary``. Not used
+  by the gate until the team decides on the decisiveness definition.
 """
 
 from __future__ import annotations
@@ -150,7 +152,84 @@ def summarize(samples: List[Dict[str, Any]], pair: Tuple[str, str], proposed_by:
                                  and majority["consultant_b"]
                                  and majority["consultant_a"] != majority["consultant_b"]),
     })
+    summary.update(branch_summary(samples, pair, k))
     return summary
+
+
+BRANCHES = ("true", "false")
+
+
+def branch_answer(sample: Dict[str, Any], pair: Tuple[str, str], branch: str) -> Optional[str]:
+    """The answer a sample gives on one branch, counted only if the crux matters there: a definite answer in play
+    that the other branch does not repeat (the other branch is the other answer or UNDETERMINED)."""
+    if not sample.get("parse_ok"):
+        return None
+    this = sample.get(f"if_{branch}")
+    other = sample.get("if_false" if branch == "true" else "if_true")
+    return this if this in pair and other != this else None
+
+
+def branch_summary(samples: List[Dict[str, Any]], pair: Tuple[str, str], k: int) -> Dict[str, Any]:
+    """Per-branch decisiveness, as evidence for the team's decision (the gate still uses the two-way ``d``).
+
+    seed30_v1 showed most cruxes are one-way ("if TRUE then X; if FALSE, undetermined"). For each branch:
+    ``flip_rate_{a,b}_{branch}`` = share of that consultant's K samples where the branch counts (``branch_answer``);
+    ``d_{branch}`` = share of the K x K cross-pairs where both consultants name the same answer on that branch, for
+    the most common such answer (``agreed_if_{branch}``; 0 and null on a tie). ``branch_conflict``: both branches
+    agree on the same answer, which contradicts itself.
+    """
+    out: Dict[str, Any] = {}
+    for branch in BRANCHES:
+        answers = {role: [branch_answer(s, pair, branch)
+                          for s in sorted((s for s in samples if s["consultant"] == role), key=lambda s: s["k"])]
+                   for role in CONSULTANT_ROLES}
+        for role in CONSULTANT_ROLES:
+            out[f"flip_rate_{side(role)}_{branch}"] = sum(a is not None for a in answers[role]) / k
+        passing = Counter(x for x in answers["consultant_a"] for y in answers["consultant_b"]
+                          if x is not None and x == y)
+        agreed, _ = _unique_top(passing)
+        out[f"d_{branch}"] = passing[agreed] / (k * k) if agreed else 0.0
+        out[f"agreed_if_{branch}"] = agreed
+    out["branch_conflict"] = bool(out["agreed_if_true"] and out["agreed_if_true"] == out["agreed_if_false"])
+    return out
+
+
+def rescore(records: List[Dict[str, Any]], *, reparse: bool = False) -> Tuple[List[Dict[str, Any]], int]:
+    """Recompute every summary field from the stored samples, with no model calls. With ``reparse``, complete
+    replies (not truncated, not failed calls) are parsed again with the current parser first. Returns the new
+    records and how many samples changed parse result."""
+    changed = 0
+    out = []
+    for record in records:
+        record = json.loads(json.dumps(record))  # deep copy
+        if record.get("status") == "evaluated":
+            pair = tuple(record["answers_in_play"])
+            if reparse:
+                for sample in record["samples"]:
+                    if sample.get("failure_type") in (None, "parse_error") and sample.get("raw_output"):
+                        parsed = parse_sample(sample["raw_output"], pair)
+                        parsed["failure_type"] = None if parsed["parse_ok"] else "parse_error"
+                        changed += parsed["parse_ok"] != sample["parse_ok"]
+                        sample.update(parsed)
+            threshold = (record["meta"].get("params") or {}).get("veto_threshold", VETO_THRESHOLD)
+            record.update(summarize(record["samples"], pair, record["proposed_by"], record["k"], threshold))
+        record["meta"] = {**record["meta"], "rescored": stage_meta(STAGE, reparse=reparse)}
+        out.append(record)
+    return out, changed
+
+
+def run_rescore(*, run: str, reparse: bool = False) -> Path:
+    """``crux track1 rescore``: rewrite decisiveness.jsonl with recomputed summaries; the original is kept once
+    as decisiveness.pre_rescore.jsonl."""
+    path = run_path(run, STAGE)
+    backup = path.with_name("decisiveness.pre_rescore.jsonl")
+    if not backup.exists():
+        backup.write_bytes(path.read_bytes())
+    records, changed = rescore(read_jsonl(path, STAGE), reparse=reparse)
+    write_jsonl(path, records, STAGE)
+    print(f"{STAGE}: rescored {len(records)} records in {path} (reparse={reparse}, {changed} samples changed "
+          f"parse result; original kept at {backup.name})")
+    return path
 
 
 def evaluate_crux(proposal: Dict[str, Any], case: Dict[str, Any], backend: Backend, registry: Registry,

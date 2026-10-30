@@ -6,6 +6,7 @@ from pathlib import Path
 
 from crux.backends import Registry
 from crux.cli import build_parser
+from crux.prompts import load_prompt
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK = REPO_ROOT / "notebooks" / "kaggle_consultants.ipynb"
@@ -74,6 +75,9 @@ class KaggleNotebookTest(unittest.TestCase):
                                                                       self.env["RUN_NAME"]))
             self.assertTrue(callable(args.func))
         self.assertTrue(parser.parse_args(steps[1]).l2)
+        propose = parser.parse_args(steps[0])
+        self.assertEqual(propose.prompt_version, self.env["PROPOSAL_PROMPT_VERSION"])
+        load_prompt("crux_proposal", propose.prompt_version)  # the configured version exists
         self.assertEqual(parser.parse_args(steps[2]).k, 3)
         self.assertEqual(parser.parse_args(steps[3]).run, self.env["RUN_NAME"])
 

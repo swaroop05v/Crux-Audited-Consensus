@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from crux.io import read_jsonl
 from crux.schema import UNDETERMINED
 from crux.track1.common import FAILURE_TYPES, run_path
+from crux.track1.decisiveness import branch_summary
 
 REPORT_NAME = "track1_report.json"
 
@@ -106,6 +107,42 @@ def decisiveness_report(records: List[Dict[str, Any]],
             group = [r for r in evaluated if leaky.get(r["crux_id"]) is wanted]
             report[f"d_{label}"] = _d_stats([r["d"] for r in group])
             report[f"veto_{label}"] = _rate(sum(r["veto_flag"] for r in group), len(group))
+    report["branch"] = branch_report(evaluated, leakage)
+    return report
+
+
+def _with_branches(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Records written before per-branch fields existed get them computed from their stored samples."""
+    if "d_true" in record:
+        return record
+    return {**record, **branch_summary(record["samples"], tuple(record["answers_in_play"]), record["k"])}
+
+
+def _pass_counts(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    n = len(records)
+    return {
+        "two_way_d>0": _rate(sum(r["d"] > 0 for r in records), n),
+        "d_true>0": _rate(sum(r["d_true"] > 0 for r in records), n),
+        "d_false>0": _rate(sum(r["d_false"] > 0 for r in records), n),
+        "either_branch>0": _rate(sum(r["d_true"] > 0 or r["d_false"] > 0 for r in records), n),
+    }
+
+
+def branch_report(evaluated: List[Dict[str, Any]],
+                  leakage: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Evidence for the decisiveness decision: per-branch d and how many cruxes each definition keeps."""
+    records = [_with_branches(r) for r in evaluated]
+    report: Dict[str, Any] = {
+        "d_true": _d_stats([r["d_true"] for r in records]),
+        "d_false": _d_stats([r["d_false"] for r in records]),
+        "flip_rates": {f"{x}_{b}": round(statistics.mean(r[f"flip_rate_{x}_{b}"] for r in records), 4)
+                       for x in ("a", "b") for b in ("true", "false")} if records else {},
+        "branch_conflict": _rate(sum(r["branch_conflict"] for r in records), len(records)),
+        "passing": _pass_counts(records),
+    }
+    if leakage is not None:
+        leaky = {r["crux_id"]: r["is_leaky"] for r in leakage if r["status"] == "checked"}
+        report["passing_non_leaky"] = _pass_counts([r for r in records if leaky.get(r["crux_id"]) is False])
     return report
 
 
@@ -169,6 +206,15 @@ def format_report(report: Dict[str, Any]) -> str:
         for label in ("non_leaky", "leaky"):
             if f"d_{label}" in dc:
                 lines.append(f"  {label:<17} d {dc[f'd_{label}']}, veto {_fmt(dc[f'veto_{label}'])}")
+        br = dc["branch"]
+        lines += ["", "decisiveness per branch (evidence only; the gate uses two-way d)",
+                  f"  d_true            {br['d_true']}",
+                  f"  d_false           {br['d_false']}",
+                  f"  flip rates        {br['flip_rates']}",
+                  f"  branch conflict   {_fmt(br['branch_conflict'])}"]
+        for label in ("passing", "passing_non_leaky"):
+            if label in br:
+                lines.append(f"  {label + ':':<17} " + ", ".join(f"{k} {_fmt(v)}" for k, v in br[label].items()))
     return "\n".join(lines)
 
 

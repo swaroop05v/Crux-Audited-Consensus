@@ -73,6 +73,13 @@ def build_parser() -> argparse.ArgumentParser:
         cases_path=a.cases, run=a.run, backend_name=a.backend, k=a.k, prompt_version=a.prompt_version,
         max_tokens=a.max_tokens, seed=a.seed, workers=a.workers))
 
+    rescore = track1.add_parser("rescore", help="Recompute decisiveness summaries (incl. per-branch d) from the "
+                                                "stored samples; no model calls")
+    rescore.add_argument("--run", required=True)
+    rescore.add_argument("--reparse", action="store_true",
+                         help="Also re-parse complete replies with the current parser (changes two-way d too).")
+    rescore.set_defaults(func=lambda a: decisiveness.run_rescore(run=a.run, reparse=a.reparse))
+
     smoke_group = groups.add_parser("smoke", help="Live-server checks.").add_subparsers(dest="command",
                                                                                         required=True)
     consultants = smoke_group.add_parser(

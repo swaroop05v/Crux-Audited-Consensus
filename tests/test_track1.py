@@ -377,6 +377,89 @@ class DecisivenessTest(unittest.TestCase):
         assert_stage_valid(self, [record], "decisiveness")
 
 
+# --------------------------------------------------------------------------- per-branch decisiveness
+
+class BranchScoringTest(unittest.TestCase):
+    def test_one_way_crux_scores_on_true_branch_only(self):
+        # The seed30_v1 pattern: definite if TRUE, UNDETERMINED if FALSE, from both consultants.
+        record, _ = run_decisive(lambda role, k, order: reply(X, UNDETERMINED))
+        self.assertEqual(record["d"], 0.0)  # two-way d unchanged
+        self.assertEqual((record["d_true"], record["d_false"]), (1.0, 0.0))
+        self.assertEqual((record["agreed_if_true"], record["agreed_if_false"]), (X, None))
+        self.assertEqual((record["flip_rate_a_true"], record["flip_rate_b_false"]), (1.0, 0.0))
+        assert_stage_valid(self, [record], "decisiveness")
+
+    def test_fully_decisive_counts_on_both_branches(self):
+        record, _ = run_decisive(lambda role, k, order: reply(X, Y))
+        self.assertEqual((record["d"], record["d_true"], record["d_false"]), (1.0, 1.0, 1.0))
+        self.assertFalse(record["branch_conflict"])
+
+    def test_same_answer_on_both_branches_counts_nowhere(self):
+        record, _ = run_decisive(lambda role, k, order: reply(X, X))
+        self.assertEqual((record["d_true"], record["d_false"], record["flip_rate_a_true"]), (0.0, 0.0, 0.0))
+
+    def test_branches_need_agreement_between_consultants(self):
+        record, _ = run_decisive(lambda role, k, order: reply(X, UNDETERMINED) if role == "consultant_a"
+                                 else reply(Y, UNDETERMINED))
+        self.assertEqual(record["d_true"], 0.0)
+        self.assertEqual(record["flip_rate_b_true"], 1.0)
+
+    def test_branch_conflict(self):
+        # A: TRUE -> X (FALSE open); B: FALSE -> X (TRUE open). Each branch "agrees" on X: contradictory.
+        script = {"consultant_a": (X, UNDETERMINED), "consultant_b": (UNDETERMINED, X)}
+        record, _ = run_decisive(lambda role, k, order: reply(*script[role]))
+        self.assertEqual((record["d_true"], record["d_false"]), (0.0, 0.0))  # no cross-consultant agreement
+        mixed = {"consultant_a": [(X, UNDETERMINED), (UNDETERMINED, X), (X, UNDETERMINED)],
+                 "consultant_b": [(X, UNDETERMINED), (UNDETERMINED, X), (UNDETERMINED, X)]}
+        record, _ = run_decisive(lambda role, k, order: reply(*mixed[role][k]))
+        self.assertTrue(record["branch_conflict"])
+
+
+class RescoreTest(unittest.TestCase):
+    def _old_style_record(self):
+        record, _ = run_decisive(lambda role, k, order: reply(X, UNDETERMINED) if k else
+                                 '{"answer_if_true": "' + X + '", "reasoning_if_true": "$\\\\frac{1}{2}$ \\\\sqrt", '
+                                 '"answer_if_false": "UNDETERMINED"}')
+        for key in [k for k in record if k.startswith(("d_true", "d_false", "flip_rate_a_", "flip_rate_b_",
+                                                       "agreed_if_", "branch_"))]:
+            del record[key]
+        return record
+
+    def test_backfill_keeps_two_way_d_and_adds_branches(self):
+        old = self._old_style_record()
+        (new,), changed = decisiveness.rescore([old])
+        self.assertEqual(changed, 0)
+        self.assertEqual(new["d"], old["d"])
+        self.assertIn("d_true", new)
+        self.assertFalse(new["meta"]["rescored"]["reparse"])
+        assert_stage_valid(self, [new], "decisiveness")
+
+    def test_reparse_applies_current_parser(self):
+        old = self._old_style_record()
+        broken = next(s for s in old["samples"] if s["k"] == 0)
+        broken.update(parse_ok=False, failure_type="parse_error", parse_error="no JSON object found",
+                      if_true=None, if_false=None,
+                      raw_output='{"answer_if_true": "%s", "reasoning_if_true": "$\\frac{1}{2}$", '
+                                 '"answer_if_false": "UNDETERMINED"}' % X)
+        (new,), changed = decisiveness.rescore([old], reparse=True)
+        self.assertGreaterEqual(changed, 1)
+        fixed = next(s for s in new["samples"] if s["k"] == 0 and s["consultant"] == broken["consultant"])
+        self.assertTrue(fixed["parse_ok"])
+
+    def test_cli_rescore_writes_backup_and_report_reads_old_files(self):
+        old = self._old_style_record()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("crux.track1.common.RUNS_DIR", Path(tmp)):
+            write_jsonl(Path(tmp) / "r" / "decisiveness.jsonl", [old], "decisiveness")
+            from crux.track1 import report
+            before = report.build_report("r")["decisiveness"]["branch"]  # computed on the fly for old records
+            cli_main(["track1", "rescore", "--run", "r"])
+            self.assertTrue((Path(tmp) / "r" / "decisiveness.pre_rescore.jsonl").exists())
+            after = report.build_report("r")["decisiveness"]["branch"]
+            self.assertEqual(before["passing"], after["passing"])
+            self.assertEqual(after["passing"]["d_true>0"]["count"], 1)
+            self.assertEqual(after["passing"]["two_way_d>0"]["count"], 0)
+
+
 # --------------------------------------------------------------------------- report
 
 class ReportTest(unittest.TestCase):
