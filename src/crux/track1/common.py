@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,8 @@ def parse_json_object(text: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Op
     start, end = text.find("{"), text.rfind("}")
     if 0 <= start < end:
         candidates.append(text[start : end + 1])
+    # Last resort: LaTeX in strings (\frac, \sqrt, \mathrm) is invalid JSON; keep it as literal backslashes.
+    candidates.append(escape_stray_backslashes(candidates[-1]))
     for candidate in candidates:
         try:
             value = json.loads(candidate)
@@ -58,6 +61,17 @@ def parse_json_object(text: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Op
         if isinstance(value, dict):
             return value, None
     return None, "no JSON object found"
+
+
+# A backslash that already starts a JSON escape we keep: \\ \" \/ or \uXXXX. \n, \t, \f, \b, \r are not kept,
+# because in model output they are mostly LaTeX (\nabla, \theta, \frac, \beta, \rho). Matched pairs are consumed
+# together so an existing "\\" is never split.
+_JSON_ESCAPE_RE = re.compile(r'\\(\\|["/]|u[0-9a-fA-F]{4})|\\')
+
+
+def escape_stray_backslashes(text: str) -> str:
+    """Double every backslash that does not start a kept JSON escape, so LaTeX survives ``json.loads``."""
+    return _JSON_ESCAPE_RE.sub(lambda m: m.group(0) if m.group(1) else "\\\\", text)
 
 
 def parallel_map(fn: Callable[[Any], Any], items: List[Any], workers: int = 1) -> List[Any]:

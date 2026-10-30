@@ -102,6 +102,25 @@ class ExtractorTest(unittest.TestCase):
         assert_stage_valid(self, records, "crux_proposals")
 
 
+class JsonParsingTest(unittest.TestCase):
+    def test_latex_backslashes_are_kept_literally(self):
+        from crux.track1.common import parse_json_object
+        value, error = parse_json_object(r'Sure: {"crux_claim": "R = \frac{|\vec{V}|^3}{\sqrt{2}} and \theta = 0"}')
+        self.assertIsNone(error)
+        self.assertEqual(value["crux_claim"], r"R = \frac{|\vec{V}|^3}{\sqrt{2}} and \theta = 0")
+
+    def test_valid_escapes_are_untouched(self):
+        from crux.track1.common import escape_stray_backslashes, parse_json_object
+        valid = r'{"a": "quote \" slash \/ backslash \\ unicode °", "b": "\\sqrt{2}"}'
+        self.assertEqual(parse_json_object(valid)[0], json.loads(valid))  # strict parse wins first
+        mixed = r'{"a": "\\sqrt{2} and \mathrm{x}"}'  # an escaped backslash next to a stray one
+        self.assertEqual(json.loads(escape_stray_backslashes(mixed))["a"], r"\sqrt{2} and \mathrm{x}")
+
+    def test_still_fails_without_json(self):
+        from crux.track1.common import parse_json_object
+        self.assertEqual(parse_json_object(r"no json \frac here"), (None, "no JSON object found"))
+
+
 # --------------------------------------------------------------------------- leakage (L1, P5, L2)
 
 MOLAR_MASS = {"A": "46,000 g/mole", "B": "5,030 g/mole", "C": "50.3 kg/mole", "D": "150,000 g/mole",
@@ -335,6 +354,13 @@ class DecisivenessTest(unittest.TestCase):
         self.assertTrue(record["mapping_tie"])
         self.assertIsNone(record["agreed_mapping"])
         self.assertEqual(record["d"], 0.0)
+
+    def test_latex_in_reasoning_still_parses(self):
+        # seed30_v1: 10 replies failed only because of LaTeX backslashes inside JSON strings.
+        raw = ('{"reasoning_if_true": "eigenvalues are $\\frac{1}{\\sqrt{2}}$ and $\\mathrm{Ca}^{2+}$",\n'
+               ' "answer_if_true": "B", "reasoning_if_false": "x", "answer_if_false": "D"}')
+        parsed = decisiveness.parse_sample(raw, ("B", "D"))
+        self.assertEqual((parsed["parse_ok"], parsed["if_true"], parsed["if_false"]), (True, "B", "D"))
 
     def test_branch_normalization(self):
         pair = ("B", "D")

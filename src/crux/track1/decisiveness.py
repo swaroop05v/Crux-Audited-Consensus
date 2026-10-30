@@ -39,7 +39,7 @@ STAGE = "decisiveness"
 PROMPT_NAME = "decisiveness"
 DEFAULT_PROMPT_VERSION = "v2"
 DEFAULT_K = 3
-DEFAULT_MAX_TOKENS = 768
+DEFAULT_MAX_TOKENS = 1024  # was 768: seed30_v1 truncated 10/480 samples (2.1%), all Llama
 VETO_THRESHOLD = 0.5
 
 Mapping = Tuple[str, str]
