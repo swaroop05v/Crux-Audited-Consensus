@@ -9,110 +9,124 @@ Defaults:
 
 Override the base URLs with VLLM_BASE_URL_A and VLLM_BASE_URL_B.
 """
-
-import os
-import sys
-
+#test_model_servers.py
 import requests
+import sys
 
 SERVERS = [
     {
         "name": "Qwen",
-        "base_url": os.getenv("VLLM_BASE_URL_A", "http://127.0.0.1:8000"),
+        "url": "http://127.0.0.1:8000",
         "model": "qwen3-8b",
-        "prompt": "Reply with exactly: QWEN OK",
+        "prompt": "Reply with exactly: QWEN OK"
     },
     {
         "name": "Llama",
-        "base_url": os.getenv("VLLM_BASE_URL_B", "http://127.0.0.1:8001"),
+        "url": "http://127.0.0.1:8001",
         "model": "llama-3.1-8b-instruct",
-        "prompt": "Reply with exactly: LLAMA OK",
-    },
+        "prompt": "Reply with exactly: LLAMA OK"
+    }
 ]
 
 
 def check_health(server):
-    """Check whether the vLLM server is healthy."""
-    url = f"{server['base_url'].rstrip('/')}/health"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(
+            server["url"] + "/health",
+            timeout=10
+        )
+
         if response.status_code == 200:
-            print(f"[PASS] {server['name']} health: HTTP 200")
+            print("[PASS]", server["name"], "health: HTTP 200")
             return True
-        print(f"[FAIL] {server['name']} health: HTTP {response.status_code}")
-    except requests.RequestException as exc:
-        print(f"[FAIL] {server['name']} health: {exc}")
+
+        print("[FAIL]", server["name"], "health:", response.status_code)
+
+    except requests.RequestException as error:
+        print("[FAIL]", server["name"], "health:", error)
+
     return False
 
 
 def test_generation(server):
-    """Send one chat-completion request to a healthy server."""
-    url = f"{server['base_url'].rstrip('/')}/v1/chat/completions"
-    payload = {
-        "model": server["model"],
-        "messages": [{"role": "user", "content": server["prompt"]}],
-        "max_tokens": 40,
-        "temperature": 0,
-    }
-
     try:
-        response = requests.post(url, json=payload, timeout=120)
-        print(f"\n{server['name']} HTTP: {response.status_code}")
+        response = requests.post(
+            server["url"] + "/v1/chat/completions",
+            json={
+                "model": server["model"],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": server["prompt"]
+                    }
+                ],
+                "max_tokens": 40,
+                "temperature": 0
+            },
+            timeout=120
+        )
+
+        print("\n", server["name"], "HTTP:", response.status_code)
 
         if response.status_code != 200:
             print(response.text[:2000])
             return False
 
-        body = response.json()
-        generated = (
-            body.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
-        if not generated:
-            print(f"[FAIL] {server['name']} returned empty content")
-            return False
+        result = response.json()
 
-        print(f"{server['name']} generated:\n{generated.strip()}")
+        generated = result["choices"][0]["message"]["content"]
+
+        print("Generated response:")
+        print(generated)
 
         if server["name"] == "Qwen" and "<think>" in generated:
-            print(
-                "[NOTE] Qwen output contains '<think>'. "
-                "Verify the configured chat-template behavior separately."
-            )
-        return True
+            print("[NOTE] Qwen includes a think section.")
 
-    except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
-        print(f"[FAIL] {server['name']} generation: {exc}")
+        return bool(generated.strip())
+
+    except requests.RequestException as error:
+        print("[FAIL]", server["name"], error)
+        return False
+
+    except (ValueError, KeyError, IndexError) as error:
+        print("[FAIL] Invalid response:", error)
         return False
 
 
 def main():
-    print("Crux Audited Consensus - simultaneous model API smoke test")
-    print("=" * 60)
+    print("CRUX AUDITED CONSENSUS")
+    print("SIMULTANEOUS MODEL API TEST")
+    print("=" * 45)
 
-    health = {server["name"]: check_health(server) for server in SERVERS}
-    if not all(health.values()):
-        print("\nAt least one server is unhealthy. Start both servers and retry.")
+    health_results = {}
+
+    for server in SERVERS:
+        health_results[server["name"]] = check_health(server)
+
+    if not all(health_results.values()):
+        print("\nAt least one server is unavailable.")
+        print("Make sure both vLLM servers are running.")
         return 1
 
-    print("\nBoth servers are healthy. Testing generation...")
-    results = {
-        server["name"]: test_generation(server)
-        for server in SERVERS
-    }
+    print("\nBoth servers are healthy!")
+    print("\nTesting generation...")
 
-    print("\nSUMMARY")
+    results = {}
+
+    for server in SERVERS:
+        results[server["name"]] = test_generation(server)
+
+    print("\n" + "=" * 45)
+    print("FINAL RESULTS")
+
     for name, passed in results.items():
-        print(f"{name}: {'PASS' if passed else 'FAIL'}")
+        print(name, ":", "PASS" if passed else "FAIL")
 
     if all(results.values()):
-        print("\nBoth model APIs passed the simultaneous smoke test.")
+        print("\nBoth model APIs passed!")
         return 0
 
-    print("\nOne or more model API tests failed.")
+    print("\nOne or more tests failed.")
     return 1
 
-
-if __name__ == "__main__":
-    sys.exit(main())
+main()
