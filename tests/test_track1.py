@@ -411,6 +411,93 @@ class ReportTest(unittest.TestCase):
         self.assertEqual((dc["d_non_leaky"]["mean"], dc["veto_leaky"]["count"]), (1.0, 1))
 
 
+# --------------------------------------------------------------------------- concurrency (--workers)
+
+def _without_timestamps(records):
+    return [{**r, "meta": {k: v for k, v in r["meta"].items() if k not in ("created_at", "params")}}
+            for r in records]
+
+
+class WorkersTest(unittest.TestCase):
+    """Concurrent requests must not change any output: per-call seeds and result order are fixed."""
+
+    def test_same_records_with_and_without_workers(self):
+        cases = CASES[:6]
+        by_workers = {}
+        for workers in (1, 4):
+            props = extractor.propose(cases, FakeBackend(REGISTRY, responder=extractor.fake_responder), REGISTRY,
+                                      workers=workers)
+            leak = leakage.check(props, index_by_id(cases), run_l2=True, workers=workers, registry=REGISTRY,
+                                 backend=FakeBackend(REGISTRY, responder=leakage.fake_responder))
+            decisive = decisiveness.evaluate(props, index_by_id(cases),
+                                             FakeBackend(REGISTRY, responder=decisiveness.fake_responder),
+                                             REGISTRY, workers=workers)
+            by_workers[workers] = [_without_timestamps(x) for x in (props, leak, decisive)]
+            self.assertEqual(decisive[0]["meta"]["params"]["workers"], workers)
+        self.assertEqual(by_workers[1], by_workers[4])
+
+    def test_calls_actually_overlap(self):
+        import threading
+        import time
+        active, peak, lock = [0], [0], threading.Lock()
+
+        def slow(model_key, messages, index):
+            return '{"crux_claim": "x"}'
+
+        class Probe(FakeBackend):
+            def _generate(self, *args, **kwargs):
+                with lock:
+                    active[0] += 1
+                    peak[0] = max(peak[0], active[0])
+                time.sleep(0.05)
+                try:
+                    return super()._generate(*args, **kwargs)
+                finally:
+                    with lock:
+                        active[0] -= 1
+
+        extractor.propose(CASES[:4], Probe(REGISTRY, responder=slow), REGISTRY, workers=4)
+        self.assertGreater(peak[0], 1)
+
+
+# --------------------------------------------------------------------------- smoke (live-server check logic)
+
+class SmokeTest(unittest.TestCase):
+    RAW = Registry.load().without_think_stripping()
+    CLEAN = json.dumps({"disagreement_analysis": "x", "crux_claim": "7 * 13 = 91", "own_verdict": "TRUE"})
+
+    def run_smoke(self, responder, finish_reason="stop", registry=None):
+        from crux.smoke import smoke_consultants
+        registry = registry or self.RAW
+        backend = FakeBackend(registry, responder=responder, finish_reason=finish_reason)
+        return smoke_consultants(CASES[:1], backend, registry)
+
+    def test_clean_replies_pass(self):
+        results = self.run_smoke(self.CLEAN)
+        self.assertEqual([(r["model_key"], r["ok"]) for r in results],
+                         [("consultant_a", True), ("consultant_b", True)])
+
+    def test_thinking_is_caught_on_the_raw_reply(self):
+        thinking = "<think>\nLet me reason.\n</think>\n" + self.CLEAN
+        results = self.run_smoke(thinking)
+        self.assertFalse(any(r["ok"] for r in results))
+        self.assertIn("raw reply contains <think>: thinking is not off", results[0]["problems"])
+        # With the normal registry, our own stripping would have hidden it; this is why smoke uses the raw one.
+        hidden = self.run_smoke(thinking, registry=REGISTRY)
+        self.assertTrue(hidden[0]["ok"])
+
+    def test_truncation_and_bad_json_fail(self):
+        truncated = self.run_smoke(self.CLEAN, finish_reason="length")
+        self.assertIn("finish_reason 'length', expected 'stop'", truncated[0]["problems"])
+        self.assertTrue(any("JSON did not parse" in p for p in self.run_smoke("no json")[0]["problems"]))
+
+    def test_cli_exits_nonzero_on_failure(self):
+        # The default fake reply has no crux_claim, so every check fails and the command must exit 1.
+        with self.assertRaises(SystemExit) as raised:
+            cli_main(["smoke", "consultants", "--backend", "fake", "--n", "1"])
+        self.assertEqual(raised.exception.code, 1)
+
+
 # --------------------------------------------------------------------------- CLI
 
 class CliTest(unittest.TestCase):

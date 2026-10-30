@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -57,6 +58,18 @@ def parse_json_object(text: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Op
         if isinstance(value, dict):
             return value, None
     return None, "no JSON object found"
+
+
+def parallel_map(fn: Callable[[Any], Any], items: List[Any], workers: int = 1) -> List[Any]:
+    """``[fn(item) for item in items]``, with up to ``workers`` calls in flight, results in input order.
+
+    Per-call seeds derive from (case, consultant, sample), so outputs do not depend on scheduling. vLLM batches
+    concurrent requests, though, which can change low-order numerics; stages record ``workers`` in meta.
+    """
+    if workers <= 1 or len(items) <= 1:
+        return [fn(item) for item in items]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(fn, items))
 
 
 def make_backend(name: str, registry: Registry, fake_responder: Any) -> Backend:

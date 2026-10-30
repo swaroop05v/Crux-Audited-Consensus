@@ -7,22 +7,34 @@ Defaults:
     Qwen  : http://127.0.0.1:8000, model name qwen3-8b
     Llama : http://127.0.0.1:8001, model name llama-3.1-8b-instruct
 
-Override the base URLs with VLLM_BASE_URL_A and VLLM_BASE_URL_B.
+Override the base URLs with VLLM_BASE_URL_A and VLLM_BASE_URL_B (as in .env, e.g. http://127.0.0.1:8000/v1).
+
+This sends plain requests without our backend's per-request settings (Qwen's enable_thinking: false), so a
+<think> section here is expected. To check the real pipeline path, use `crux smoke consultants`.
+Lives in scripts/, not tests/: it needs live servers.
 """
 #test_model_servers.py
+import os
 import requests
 import sys
+
+
+def _server_url(env_name, default):
+    """Server root from the environment; .env values end in /v1, which this script adds itself."""
+    url = (os.environ.get(env_name) or default).rstrip("/")
+    return url[: -len("/v1")] if url.endswith("/v1") else url
+
 
 SERVERS = [
     {
         "name": "Qwen",
-        "url": "http://127.0.0.1:8000",
+        "url": _server_url("VLLM_BASE_URL_A", "http://127.0.0.1:8000"),
         "model": "qwen3-8b",
         "prompt": "Reply with exactly: QWEN OK"
     },
     {
         "name": "Llama",
-        "url": "http://127.0.0.1:8001",
+        "url": _server_url("VLLM_BASE_URL_B", "http://127.0.0.1:8001"),
         "model": "llama-3.1-8b-instruct",
         "prompt": "Reply with exactly: LLAMA OK"
     }

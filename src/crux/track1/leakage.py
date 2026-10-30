@@ -23,8 +23,8 @@ from crux.io import index_by_id, read_jsonl, stage_meta, write_jsonl
 from crux.prompts import Prompt, load_prompt
 from crux.schema import SCHEMA_VERSION
 from crux.seeding import stable_seed
-from crux.track1.common import (CONSULTANT_ROLES, load_cases, make_backend, parse_outcome, run_path, safe_chat,
-                                shared_call_params)
+from crux.track1.common import (CONSULTANT_ROLES, load_cases, make_backend, parallel_map, parse_outcome, run_path,
+                                safe_chat, shared_call_params)
 from crux.track1.quantities import Quantity, comparable, extract_quantities, relative_difference
 
 STAGE = "leakage"
@@ -163,32 +163,32 @@ def _parse_probe(text: Optional[str]) -> Dict[str, Any]:
 def check(proposals: List[Dict[str, Any]], cases_by_id: Dict[str, Dict[str, Any]], *,
           backend: Optional[Backend] = None, registry: Optional[Registry] = None, run_l2: bool = False,
           probe_max_tokens: int = DEFAULT_PROBE_MAX_TOKENS, seed: int = 42,
-          overlap_threshold: float = OVERLAP_THRESHOLD, rel_tol: float = NUMERIC_REL_TOL) -> List[Dict[str, Any]]:
+          overlap_threshold: float = OVERLAP_THRESHOLD, rel_tol: float = NUMERIC_REL_TOL,
+          workers: int = 1) -> List[Dict[str, Any]]:
     if run_l2 and (backend is None or registry is None):
         raise ValueError("L2 needs a backend and a registry")
     prompt = load_prompt(PROBE_PROMPT, "v1") if run_l2 else None
     meta = stage_meta(STAGE, params={"overlap_threshold": overlap_threshold, "numeric_rel_tol": rel_tol,
                                      "l2": run_l2, "probe_max_tokens": probe_max_tokens if run_l2 else None,
-                                     "base_seed": seed})
-    records = []
-    for proposal in proposals:
+                                     "base_seed": seed, "workers": workers})
+
+    def one(proposal: Dict[str, Any]) -> Dict[str, Any]:
         record = {"schema_version": SCHEMA_VERSION, "stage": STAGE, "id": proposal["id"],
                   "crux_id": proposal["crux_id"], "proposed_by": proposal["proposed_by"]}
         claim = proposal.get("crux_claim")
         if not proposal.get("parse_ok") or not claim:
-            records.append({**record, "status": "no_claim", "leak_probe_failed": None, "is_leaky": None,
-                            "meta": meta})
-            continue
+            return {**record, "status": "no_claim", "leak_probe_failed": None, "is_leaky": None, "meta": meta}
         case = cases_by_id[proposal["id"]]
         l1 = l1_check(claim, case["choices"], overlap_threshold=overlap_threshold, rel_tol=rel_tol)
         l2 = (l2_probe(claim, case, backend, registry, prompt, crux_id=proposal["crux_id"],
                        max_tokens=probe_max_tokens, seed=seed) if run_l2 else None)
-        records.append({**record, "status": "checked", "crux_claim": claim, "l1": l1, "l2": l2,
-                        "p5_flags": p5_flags(claim),
-                        # If both probe replies are unusable, fall back to L1 and mark it so it can be counted.
-                        "leak_probe_failed": l2["all_failed"] if l2 else None,
-                        "is_leaky": l1["flagged"] or bool(l2 and l2["flagged"]), "meta": meta})
-    return records
+        return {**record, "status": "checked", "crux_claim": claim, "l1": l1, "l2": l2,
+                "p5_flags": p5_flags(claim),
+                # If both probe replies are unusable, fall back to L1 and mark it so it can be counted.
+                "leak_probe_failed": l2["all_failed"] if l2 else None,
+                "is_leaky": l1["flagged"] or bool(l2 and l2["flagged"]), "meta": meta}
+
+    return parallel_map(one, list(proposals), workers if run_l2 else 1)
 
 
 def fake_responder(model_key: str, messages: List[Dict[str, str]], call_index: int) -> str:
@@ -197,14 +197,14 @@ def fake_responder(model_key: str, messages: List[Dict[str, str]], call_index: i
 
 
 def run_stage(*, cases_path: Path, run: str, backend_name: str = "fake", run_l2: bool = False,
-              probe_max_tokens: int = DEFAULT_PROBE_MAX_TOKENS, seed: int = 42,
+              probe_max_tokens: int = DEFAULT_PROBE_MAX_TOKENS, seed: int = 42, workers: int = 1,
               registry: Optional[Registry] = None) -> Path:
     registry = registry or Registry.load()
     backend = make_backend(backend_name, registry, fake_responder) if run_l2 else None
     proposals = read_jsonl(run_path(run, "crux_proposals"), "crux_proposals")
     cases_by_id = index_by_id(load_cases(cases_path))
     records = check(proposals, cases_by_id, backend=backend, registry=registry, run_l2=run_l2,
-                    probe_max_tokens=probe_max_tokens, seed=seed)
+                    probe_max_tokens=probe_max_tokens, seed=seed, workers=workers)
     for record in records:
         record["meta"] = {**record["meta"], "inputs": {"cases": str(cases_path),
                                                        "crux_proposals": str(run_path(run, "crux_proposals"))}}

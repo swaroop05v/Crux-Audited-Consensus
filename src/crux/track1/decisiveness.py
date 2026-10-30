@@ -32,8 +32,8 @@ from crux.io import index_by_id, read_jsonl, stage_meta, write_jsonl
 from crux.prompts import Prompt, load_prompt
 from crux.schema import SCHEMA_VERSION, UNDETERMINED
 from crux.seeding import stable_seed
-from crux.track1.common import (CONSULTANT_ROLES, failure_summary, load_cases, make_backend, parse_json_object,
-                                parse_outcome, run_path, safe_chat, shared_call_params, side)
+from crux.track1.common import (CONSULTANT_ROLES, failure_summary, load_cases, make_backend, parallel_map,
+                                parse_json_object, parse_outcome, run_path, safe_chat, shared_call_params, side)
 
 STAGE = "decisiveness"
 PROMPT_NAME = "decisiveness"
@@ -178,11 +178,12 @@ def evaluate_crux(proposal: Dict[str, Any], case: Dict[str, Any], backend: Backe
 def evaluate(proposals: List[Dict[str, Any]], cases_by_id: Dict[str, Dict[str, Any]], backend: Backend,
              registry: Registry, *, k: int = DEFAULT_K, prompt_version: str = DEFAULT_PROMPT_VERSION,
              max_tokens: int = DEFAULT_MAX_TOKENS, seed: int = 42,
-             veto_threshold: float = VETO_THRESHOLD) -> List[Dict[str, Any]]:
-    """Every parsed proposal is evaluated, leaky or not (Track 4 reports d for leaky cruxes too)."""
+             veto_threshold: float = VETO_THRESHOLD, workers: int = 1) -> List[Dict[str, Any]]:
+    """Every parsed proposal is evaluated, leaky or not (Track 4 reports d for leaky cruxes too).
+    With ``workers`` > 1, cruxes are evaluated concurrently; each crux's 2K samples stay sequential."""
     prompt = load_prompt(PROMPT_NAME, prompt_version)
-    records = []
-    for proposal in proposals:
+
+    def one(proposal: Dict[str, Any]) -> Dict[str, Any]:
         record = {"schema_version": SCHEMA_VERSION, "stage": STAGE, "id": proposal["id"],
                   "crux_id": proposal["crux_id"], "proposed_by": proposal["proposed_by"]}
         if not proposal.get("parse_ok") or not proposal.get("crux_claim"):
@@ -192,11 +193,12 @@ def evaluate(proposals: List[Dict[str, Any]], cases_by_id: Dict[str, Dict[str, A
             result = evaluate_crux(proposal, cases_by_id[proposal["id"]], backend, registry, prompt, k=k,
                                    max_tokens=max_tokens, seed=seed, veto_threshold=veto_threshold)
             calls = result.pop("calls")
-        records.append({**record, **result,
-                        "meta": stage_meta(STAGE, **prompt.meta(), calls=calls,
-                                           params={"k": k, "max_tokens": max_tokens, "base_seed": seed,
-                                                   "veto_threshold": veto_threshold})})
-    return records
+        return {**record, **result,
+                "meta": stage_meta(STAGE, **prompt.meta(), calls=calls,
+                                   params={"k": k, "max_tokens": max_tokens, "base_seed": seed,
+                                           "veto_threshold": veto_threshold, "workers": workers})}
+
+    return parallel_map(one, list(proposals), workers)
 
 
 _CANDIDATES_RE = re.compile(r"\[CANDIDATE ANSWERS\]\s*\n- (\S+)\s*\n- (\S+)")
@@ -212,12 +214,12 @@ def fake_responder(model_key: str, messages: List[Dict[str, str]], call_index: i
 
 def run_stage(*, cases_path: Path, run: str, backend_name: str, k: int = DEFAULT_K,
               prompt_version: str = DEFAULT_PROMPT_VERSION, max_tokens: int = DEFAULT_MAX_TOKENS, seed: int = 42,
-              registry: Optional[Registry] = None) -> Path:
+              workers: int = 1, registry: Optional[Registry] = None) -> Path:
     registry = registry or Registry.load()
     backend = make_backend(backend_name, registry, fake_responder)
     proposals = read_jsonl(run_path(run, "crux_proposals"), "crux_proposals")
     records = evaluate(proposals, index_by_id(load_cases(cases_path)), backend, registry, k=k,
-                       prompt_version=prompt_version, max_tokens=max_tokens, seed=seed)
+                       prompt_version=prompt_version, max_tokens=max_tokens, seed=seed, workers=workers)
     for record in records:
         record["meta"]["inputs"] = {"cases": str(cases_path),
                                     "crux_proposals": str(run_path(run, "crux_proposals"))}

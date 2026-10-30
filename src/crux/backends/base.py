@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -113,6 +113,11 @@ class Registry:
                 extra={k: v for k, v in entry.items() if k not in _SPEC_FIELDS},
             )
         return cls(models, backends, raw.get("sampling") or {})
+
+    def without_think_stripping(self) -> "Registry":
+        """A copy whose models keep ``<think>`` blocks, for checking that thinking is really off."""
+        models = {key: replace(spec, strip_think=False) for key, spec in self.models.items()}
+        return Registry(models, self.backends, self._sampling)
 
     def spec(self, model_key: str) -> ModelSpec:
         if model_key not in self.models:

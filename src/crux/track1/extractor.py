@@ -7,8 +7,9 @@ keyed by ``crux_id = "{id}#a" | "{id}#b"``. Prompt v2 adds ``own_verdict`` (audi
 from __future__ import annotations
 
 import json
+import zlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from crux.backends import Backend, Registry
 from crux.data.choices import format_choices
@@ -17,7 +18,8 @@ from crux.prompts import Prompt, load_prompt
 from crux.schema import SCHEMA_VERSION
 from crux.seeding import stable_seed
 from crux.track1.common import (CONSULTANT_ROLES, format_reasoning, load_cases, make_backend, other_role,
-                                failure_summary, parse_json_object, parse_outcome, run_path, safe_chat, side)
+                                failure_summary, parallel_map, parse_json_object, parse_outcome, run_path,
+                                safe_chat, side)
 
 STAGE = "crux_proposals"
 EMPTY_PROPOSAL = {"crux_claim": None, "disagreement_analysis": None, "proposer_own_verdict": None}
@@ -69,47 +71,50 @@ def parse_proposal(text: Optional[str]) -> Dict[str, Any]:
 
 def propose(cases: List[Dict[str, Any]], backend: Backend, registry: Registry, *,
             prompt_version: str = DEFAULT_PROMPT_VERSION, max_tokens: int = DEFAULT_MAX_TOKENS,
-            seed: int = 42) -> List[Dict[str, Any]]:
+            seed: int = 42, workers: int = 1) -> List[Dict[str, Any]]:
     prompt = load_prompt(PROMPT_NAME, prompt_version)
     sampling = registry.sampling("consultant")
-    records = []
-    for case in cases:
-        for role in CONSULTANT_ROLES:
-            call_seed = stable_seed(seed, STAGE, case["id"], role)
-            outcome = safe_chat(backend, role, proposal_messages(case, role, prompt), **sampling,
-                                max_tokens=max_tokens, seed=call_seed)
-            parsed = parse_outcome(outcome, parse_proposal, EMPTY_PROPOSAL)
-            records.append({
-                "schema_version": SCHEMA_VERSION,
-                "stage": STAGE,
-                "id": case["id"],
-                "crux_id": f"{case['id']}#{side(role)}",
-                "proposed_by": role,
-                **parsed,
-                **outcome.fields(),
-                "seed": call_seed,
-                "meta": stage_meta(STAGE, **prompt.meta(), call=outcome.params,
-                                   params={"max_tokens": max_tokens, "base_seed": seed}),
-            })
-    return records
+
+    def one(task: Tuple[Dict[str, Any], str]) -> Dict[str, Any]:
+        case, role = task
+        call_seed = stable_seed(seed, STAGE, case["id"], role)
+        outcome = safe_chat(backend, role, proposal_messages(case, role, prompt), **sampling,
+                            max_tokens=max_tokens, seed=call_seed)
+        parsed = parse_outcome(outcome, parse_proposal, EMPTY_PROPOSAL)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "stage": STAGE,
+            "id": case["id"],
+            "crux_id": f"{case['id']}#{side(role)}",
+            "proposed_by": role,
+            **parsed,
+            **outcome.fields(),
+            "seed": call_seed,
+            "meta": stage_meta(STAGE, **prompt.meta(), call=outcome.params,
+                               params={"max_tokens": max_tokens, "base_seed": seed, "workers": workers}),
+        }
+
+    return parallel_map(one, [(case, role) for case in cases for role in CONSULTANT_ROLES], workers)
 
 
 def fake_responder(model_key: str, messages: List[Dict[str, str]], call_index: int) -> str:
-    """Canned 1A reply for offline plumbing runs (``--backend fake``)."""
+    """Canned 1A reply for offline plumbing runs (``--backend fake``). Depends only on the prompt, so it is the
+    same whatever order concurrent calls arrive in."""
+    tag = zlib.crc32(messages[-1]["content"].encode("utf-8")) % 1000
     return json.dumps({
         "disagreement_analysis": f"Fake analysis by {model_key}.",
-        "crux_claim": f"Fake self-contained claim number {call_index} proposed by {model_key}.",
+        "crux_claim": f"Fake self-contained claim number {tag} proposed by {model_key}.",
         "own_verdict": "TRUE",
     })
 
 
 def run_stage(*, cases_path: Path, run: str, backend_name: str, prompt_version: str = DEFAULT_PROMPT_VERSION,
               max_tokens: int = DEFAULT_MAX_TOKENS, seed: int = 42, limit: Optional[int] = None,
-              registry: Optional[Registry] = None) -> Path:
+              workers: int = 1, registry: Optional[Registry] = None) -> Path:
     registry = registry or Registry.load()
     backend = make_backend(backend_name, registry, fake_responder)
     records = propose(load_cases(cases_path, limit), backend, registry, prompt_version=prompt_version,
-                      max_tokens=max_tokens, seed=seed)
+                      max_tokens=max_tokens, seed=seed, workers=workers)
     for record in records:
         record["meta"]["inputs"] = {"cases": str(cases_path)}
     out = run_path(run, STAGE)

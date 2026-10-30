@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from crux.backends.base import Backend, ModelSpec, Registry
@@ -32,6 +33,7 @@ class FakeBackend(Backend):
         self.verdict = verdict or {"p_true_raw": 0.6, "p_false_raw": 0.2}
         self.finish_reason = finish_reason
         self.calls: List[Dict[str, Any]] = []
+        self._lock = threading.Lock()
 
     def spec(self, model_key: str) -> ModelSpec:
         return self.registry.spec(model_key)
@@ -48,14 +50,15 @@ class FakeBackend(Backend):
                   top_p: Optional[float], max_tokens: int, seed: Optional[int],
                   n: int) -> Tuple[List[str], Dict[str, Any]]:
         texts, finish_reasons = [], []
-        for _ in range(n):
-            index = len(self.calls)
-            texts.append(self._respond(spec.key, messages))
-            finish_reasons.append(self.finish_reason(spec.key, index) if callable(self.finish_reason)
-                                  else self.finish_reason)
-            self.calls.append({"model_key": spec.key, "messages": copy.deepcopy(messages),
-                               "temperature": temperature, "top_p": top_p, "max_tokens": max_tokens,
-                               "seed": seed})
+        with self._lock:  # stages may call from several threads (--workers)
+            for _ in range(n):
+                index = len(self.calls)
+                texts.append(self._respond(spec.key, messages))
+                finish_reasons.append(self.finish_reason(spec.key, index) if callable(self.finish_reason)
+                                      else self.finish_reason)
+                self.calls.append({"model_key": spec.key, "messages": copy.deepcopy(messages),
+                                   "temperature": temperature, "top_p": top_p, "max_tokens": max_tokens,
+                                   "seed": seed})
         return texts, {"finish_reasons": finish_reasons}
 
     def verdict_probs(self, model_key: str, messages: List[Dict[str, str]], completion: str,

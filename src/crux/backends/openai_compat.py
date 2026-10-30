@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import random
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -48,7 +49,8 @@ class OpenAICompatBackend(Backend):
         self.backoff_base = backoff_base
         self.backoff_max = backoff_max
         self.timeout = timeout
-        self.session = session or requests.Session()
+        self._session = session  # injected (tests); otherwise one requests.Session per thread
+        self._local = threading.local()
         self.sleep = sleep
         self._jitter = random.Random()
 
@@ -83,6 +85,14 @@ class OpenAICompatBackend(Backend):
             except ValueError:
                 pass
         return min(self.backoff_max, self.backoff_base * 2 ** attempt) * (0.5 + self._jitter.random() / 2)
+
+    @property
+    def session(self) -> Any:
+        if self._session is not None:
+            return self._session
+        if not hasattr(self._local, "session"):
+            self._local.session = requests.Session()
+        return self._local.session
 
     def url_for(self, spec: ModelSpec) -> str:
         base = self.model_base_urls.get(spec.key) or self.base_url
