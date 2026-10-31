@@ -9,10 +9,13 @@ from typing import Any, Dict, Literal
 from crux.backends.base import Backend, Registry
 from crux.io import stage_meta
 from crux.prompts import load_prompt
+from crux.track1.common import failure_summary, parse_outcome, safe_chat
 
 Verdict = Literal["TRUE", "FALSE"]
 
-_VERDICT_RE = re.compile(r"(?m)^VERDICT:\s*(TRUE|FALSE)\s*$")
+# Asterisks only around the whole line, and an uppercase keyword: measure_c_prob cuts at exactly "VERDICT:"
+# and reads the next token, so "verdict:" or bold after the colon would break c_prob.
+_VERDICT_RE = re.compile(r"(?m)^\**VERDICT:\s*((?i:TRUE|FALSE))[.*]*\s*$")
 
 _FINAL_ANSWER_RE = re.compile(
     r"(?m)^FINAL ANSWER:\s*([A-Z])\s*$"
@@ -132,13 +135,22 @@ def judge_question_plus_crux(
 
 
 def parse_verdict(completion: str) -> Verdict:
-    """Extract an explicit TRUE/FALSE verdict; reject missing or ambiguous output."""
-    matches = _VERDICT_RE.findall(completion)
-    if len(matches) != 1:
+    """Extract an explicit TRUE/FALSE verdict; reject missing or conflicting output."""
+    verdicts = {match.upper() for match in _VERDICT_RE.findall(completion)}
+    if len(verdicts) != 1:
         raise ValueError(
-            f"Expected exactly one 'VERDICT: TRUE/FALSE' line; found {len(matches)}."
+            "Expected one consistent 'VERDICT: TRUE/FALSE' line; "
+            f"found {sorted(verdicts) or 'none'}."
         )
-    return matches[0]  # type: ignore[return-value]
+    return verdicts.pop()  # type: ignore[return-value]
+
+
+def _parse_sample(text: str) -> Dict[str, Any]:
+    """Parse one self-consistency reply into the fields parse_outcome expects."""
+    try:
+        return {"verdict": parse_verdict(text), "parse_ok": True, "parse_error": None}
+    except ValueError as exc:
+        return {"verdict": None, "parse_ok": False, "parse_error": str(exc)}
 
 
 def judge_crux(
@@ -223,7 +235,12 @@ def measure_c_cons(
     seeds: list[int],
     max_tokens: int = 512,
 ) -> Dict[str, Any]:
-    """Measure five-sample TRUE/FALSE self-consistency for a crux claim."""
+    """Measure five-sample TRUE/FALSE self-consistency for a crux claim.
+
+    A sample whose model call fails, is truncated, or does not parse is kept with
+    verdict None and left out of the counts; c_cons = |2p - 1| uses valid samples
+    only. Configuration errors raise before any sample is attempted.
+    """
     if not isinstance(claim, str) or not claim.strip():
         raise ValueError("claim must be a non-empty string")
     if len(seeds) != 5 or any(not isinstance(seed, int) for seed in seeds):
@@ -234,38 +251,59 @@ def measure_c_cons(
     prompt = load_prompt("judge_crux")
     messages = prompt.messages(crux_claim=claim.strip())
 
+    # safe_chat records BackendError as a failed call, which would hide a bad
+    # model_key or backend as n_valid = 0, so check them outside it first.
+    backend.spec(model_key)
+
     samples = []
     for seed in seeds:
-        result = backend.chat(
+        outcome = safe_chat(
+            backend,
             model_key,
             messages,
             **registry.sampling("judge_cons"),
             max_tokens=max_tokens,
             seed=seed,
         )
-        verdict = parse_verdict(result.text)
+        parsed = parse_outcome(outcome, _parse_sample, {"verdict": None})
         samples.append(
             {
                 "seed": seed,
-                "verdict": verdict,
-                "raw_completion": result.text,
-                "model_call": result.params,
+                **parsed,
+                **outcome.fields(),
+                "model_call": outcome.params,
             }
         )
 
     true_count = sum(sample["verdict"] == "TRUE" for sample in samples)
-    false_count = len(samples) - true_count
-    majority_verdict = (
-        "TRUE" if true_count > false_count
-        else "FALSE" if false_count > true_count
-        else "TIE"
-    )
+    false_count = sum(sample["verdict"] == "FALSE" for sample in samples)
+    n_valid = true_count + false_count
+
+    if n_valid:
+        p = true_count / n_valid
+        c_cons = abs(2 * p - 1)
+        agreement_rate = max(true_count, false_count) / n_valid
+        majority_verdict = (
+            "TRUE" if true_count > false_count
+            else "FALSE" if false_count > true_count
+            else "TIE"
+        )
+        c_cons_error = None
+    else:
+        c_cons = None
+        agreement_rate = None
+        majority_verdict = None
+        c_cons_error = f"no valid samples ({failure_summary(samples)})"
 
     return {
         "samples": samples,
         "true_count": true_count,
         "false_count": false_count,
-        "agreement_rate": max(true_count, false_count) / len(samples),
+        "n_valid": n_valid,
+        "n_failed": len(samples) - n_valid,
+        "c_cons": c_cons,
+        "c_cons_error": c_cons_error,
+        "agreement_rate": agreement_rate,
         "majority_verdict": majority_verdict,
         "meta": stage_meta(
             "c_cons",
