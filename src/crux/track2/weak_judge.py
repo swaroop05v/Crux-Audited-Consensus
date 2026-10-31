@@ -153,6 +153,33 @@ def _parse_sample(text: str) -> Dict[str, Any]:
         return {"verdict": None, "parse_ok": False, "parse_error": str(exc)}
 
 
+def _verdict_sample(
+    messages: list[Dict[str, str]],
+    *,
+    model_key: str,
+    backend: Backend,
+    sampling: Dict[str, Any],
+    seed: int,
+    max_tokens: int,
+) -> Dict[str, Any]:
+    """One Prompt 2A completion; a failed call, truncation or bad reply is recorded, not raised."""
+    outcome = safe_chat(
+        backend,
+        model_key,
+        messages,
+        **sampling,
+        max_tokens=max_tokens,
+        seed=seed,
+    )
+    parsed = parse_outcome(outcome, _parse_sample, {"verdict": None})
+    return {
+        "seed": seed,
+        **parsed,
+        **outcome.fields(),
+        "model_call": outcome.params,
+    }
+
+
 def judge_crux(
     claim: str,
     *,
@@ -189,6 +216,40 @@ def judge_crux(
     }
 
 
+def judge_crux_recorded(
+    claim: str,
+    *,
+    model_key: str,
+    backend: Backend,
+    registry: Registry,
+    seed: int,
+    max_tokens: int = 512,
+    sampling_profile: str = "judge_verdict",
+) -> Dict[str, Any]:
+    """judge_crux for pipeline stages: one bad crux must not stop a run.
+
+    A model call that fails, is truncated, or does not parse comes back as
+    verdict None with Track 1's failure fields. Configuration errors still raise.
+    """
+    if not isinstance(claim, str) or not claim.strip():
+        raise ValueError("claim must be a non-empty string")
+
+    prompt = load_prompt("judge_crux")
+    messages = prompt.messages(crux_claim=claim.strip())
+
+    # As in measure_c_cons: safe_chat would hide these as failed calls.
+    backend.spec(model_key)
+
+    return _verdict_sample(
+        messages,
+        model_key=model_key,
+        backend=backend,
+        sampling=registry.sampling(sampling_profile),
+        seed=seed,
+        max_tokens=max_tokens,
+    )
+
+
 def measure_c_prob(
     claim: str,
     completion: str,
@@ -211,11 +272,15 @@ def measure_c_prob(
         marker="VERDICT:",
     )
 
+    p_true = probabilities["p_true"]
+
     return {
         "p_true_raw": probabilities["p_true_raw"],
         "p_false_raw": probabilities["p_false_raw"],
         "p_mass_tf": probabilities["p_mass_tf"],
-        "p_true": probabilities["p_true"],
+        "p_true": p_true,
+        # |P(TRUE) - P(FALSE)| renormalized over the two (Doc 2); p_true is None at zero mass.
+        "c_prob": abs(2 * p_true - 1) if p_true is not None else None,
         "meta": {
             "model_key": model_key,
             "method": "next_token_probability_mass",
@@ -254,26 +319,19 @@ def measure_c_cons(
     # safe_chat records BackendError as a failed call, which would hide a bad
     # model_key or backend as n_valid = 0, so check them outside it first.
     backend.spec(model_key)
+    sampling = registry.sampling("judge_cons")
 
-    samples = []
-    for seed in seeds:
-        outcome = safe_chat(
-            backend,
-            model_key,
+    samples = [
+        _verdict_sample(
             messages,
-            **registry.sampling("judge_cons"),
-            max_tokens=max_tokens,
+            model_key=model_key,
+            backend=backend,
+            sampling=sampling,
             seed=seed,
+            max_tokens=max_tokens,
         )
-        parsed = parse_outcome(outcome, _parse_sample, {"verdict": None})
-        samples.append(
-            {
-                "seed": seed,
-                **parsed,
-                **outcome.fields(),
-                "model_call": outcome.params,
-            }
-        )
+        for seed in seeds
+    ]
 
     true_count = sum(sample["verdict"] == "TRUE" for sample in samples)
     false_count = sum(sample["verdict"] == "FALSE" for sample in samples)
@@ -309,7 +367,8 @@ def measure_c_cons(
             "c_cons",
             model_key=model_key,
             sample_count=len(samples),
-            temperature=0.7,
+            temperature=sampling["temperature"],
+            top_p=sampling["top_p"],
             seeds=list(seeds),
             **prompt.meta(),
         ),

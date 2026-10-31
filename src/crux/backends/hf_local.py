@@ -10,7 +10,9 @@ is not mistaken for a confident verdict.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+import gc
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from crux.backends.base import Backend, BackendError, ModelSpec, Registry
 
@@ -65,6 +67,18 @@ def verdict_readout(prob_of: Callable[[int], float], true_ids: Sequence[int],
         "true_token_ids": list(true_ids),
         "false_token_ids": list(false_ids),
     }
+
+
+@contextmanager
+def _oom_as_backend_error(model_key: str) -> Iterator[None]:
+    """A CUDA OOM on one crux is a failed call, recorded like any other, not the end of the run."""
+    import torch
+
+    try:
+        yield
+    except torch.cuda.OutOfMemoryError as exc:
+        torch.cuda.empty_cache()
+        raise BackendError(f"{model_key}: GPU out of memory") from exc
 
 
 class HFLocalBackend(Backend):
@@ -123,7 +137,7 @@ class HFLocalBackend(Backend):
                 kwargs["top_p"] = top_p
         else:
             kwargs.update(do_sample=False, temperature=None, top_p=None, top_k=None)
-        with torch.no_grad():
+        with _oom_as_backend_error(spec.key), torch.no_grad():
             output = model.generate(**inputs, **kwargs)
         new_tokens = output[:, inputs["input_ids"].shape[1]:]
         texts = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
@@ -141,9 +155,19 @@ class HFLocalBackend(Backend):
         tokenizer, model = self._load(spec)
         text = self._render(spec, tokenizer, messages) + cut_after_marker(completion, marker)
         inputs = tokenizer(text, return_tensors="pt", add_special_tokens=False).to(model.device)
-        with torch.no_grad():
+        with _oom_as_backend_error(spec.key), torch.no_grad():
             logits = model(**inputs).logits[0, -1].float()
         probs = torch.softmax(logits, dim=-1)
         true_ids, false_ids = verdict_token_ids(tokenizer)
         readout = verdict_readout(lambda token_id: probs[token_id].item(), true_ids, false_ids)
         return {**readout, **spec.describe(), **self._versions(model)}
+
+    def release(self, model_key: str) -> None:
+        """Drop a loaded model and return its GPU memory, so one layer at a time fits a small GPU."""
+        if self._loaded.pop(model_key, None) is None:
+            return
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

@@ -8,9 +8,10 @@ Every pipeline stage writes its own JSONL file, one record per case (or per crux
 - ``eval`` (optional): every label-derived field. Method code must never read it; ``crux.io.read_jsonl`` strips
   it unless called with ``with_labels=True``.
 
-Defined stages: ``cases`` (keyed by ``id``) and the Track 1 stages ``crux_proposals``, ``leakage`` and
-``decisiveness`` (keyed by ``crux_id`` = ``"{id}#a"`` / ``"{id}#b"``, the consultant who proposed it). Later stages
-add a ``validate_<stage>`` function plus entries in ``STAGE_VALIDATORS`` and ``STAGE_KEYS`` when they are built.
+Defined stages: ``cases`` (keyed by ``id``), the Track 1 stages ``crux_proposals``, ``leakage`` and ``decisiveness``,
+and the Track 2 stage ``judges`` (all keyed by ``crux_id`` = ``"{id}#a"`` / ``"{id}#b"``, the consultant who proposed
+it). Later stages add a ``validate_<stage>`` function plus entries in ``STAGE_VALIDATORS`` and ``STAGE_KEYS`` when they
+are built.
 """
 
 from __future__ import annotations
@@ -288,11 +289,84 @@ def validate_decisiveness(record: Dict[str, Any]) -> List[str]:
     return errors
 
 
+VERDICTS = (None, "TRUE", "FALSE")
+_MASS_SLACK = 1e-6  # p_mass_tf is a float sum of probabilities, so it can land just above 1
+
+
+def _check_unit(value: Any, path: str, errors: List[str], *, upper: float = 1.0) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= upper:
+        errors.append(f"{path}: must be a number in [0, 1] or null")
+
+
+def check_judge_layer(entry: Any, path: str, errors: List[str]) -> None:
+    """One judge layer's result on one crux. Also used on checkpoints, which hold these entries before any record."""
+    if not isinstance(entry, dict):
+        errors.append(f"{path}: must be an object")
+        return
+    verdict = entry.get("verdict")
+    if verdict not in VERDICTS:
+        errors.append(f"{path}.verdict: {verdict!r} must be TRUE, FALSE or null")
+    if not isinstance(entry.get("parse_ok"), bool):
+        errors.append(f"{path}.parse_ok: must be a bool")
+    elif entry["parse_ok"] != (verdict is not None):
+        errors.append(f"{path}.verdict: must be set exactly when parse_ok is true")
+    _check_failure(entry, f"{path}.", errors)
+    if not isinstance(entry.get("seed"), int):
+        errors.append(f"{path}.seed: must be an int")
+    for key in ("raw_output", "call_error", "parse_error", "c_prob_error"):
+        if entry.get(key) is not None and not isinstance(entry[key], str):
+            errors.append(f"{path}.{key}: must be a string or null")
+    _check_unit(entry.get("c_prob"), f"{path}.c_prob", errors)
+    _check_unit(entry.get("p_true"), f"{path}.p_true", errors)
+    _check_unit(entry.get("p_mass_tf"), f"{path}.p_mass_tf", errors, upper=1 + _MASS_SLACK)
+    if verdict is None and entry.get("c_prob") is not None:
+        errors.append(f"{path}.c_prob: must be null when verdict is null")
+
+    c_cons = entry.get("c_cons")
+    if c_cons is None:
+        return
+    if not isinstance(c_cons, dict) or not isinstance(c_cons.get("samples"), list):
+        errors.append(f"{path}.c_cons: must be null or an object with a samples list")
+        return
+    for position, sample in enumerate(c_cons["samples"]):
+        if not isinstance(sample, dict):
+            errors.append(f"{path}.c_cons.samples[{position}]: must be an object")
+            continue
+        _check_failure(sample, f"{path}.c_cons.samples[{position}].", errors)
+    _check_unit(c_cons.get("c_cons"), f"{path}.c_cons.c_cons", errors)
+
+
+def validate_judges(record: Dict[str, Any]) -> List[str]:
+    """Stage ``judges``: per-layer Prompt 2A verdict, c_prob and c_cons for one crux, leaky or not."""
+    errors: List[str] = []
+    _check_crux_ref(record, errors)
+    status = record.get("status")
+    layers = record.get("layers")
+    if status == "no_claim":
+        if layers:
+            errors.append("layers: must be empty when status is no_claim")
+        if record.get("crux_claim") is not None:
+            errors.append("crux_claim: must be null when status is no_claim")
+        return errors
+    if status != "judged":
+        return errors + [f"status: {status!r} not in ['judged', 'no_claim']"]
+    if not isinstance(record.get("crux_claim"), str) or not record["crux_claim"].strip():
+        errors.append("crux_claim: must be a non-empty string when judged")
+    if not isinstance(layers, dict) or not layers:
+        return errors + ["layers: must be a non-empty object when judged"]
+    for layer, entry in layers.items():
+        check_judge_layer(entry, f"layers.{layer}", errors)
+    return errors
+
+
 STAGE_VALIDATORS: Dict[str, Callable[[Dict[str, Any]], List[str]]] = {
     "cases": validate_cases,
     "crux_proposals": validate_crux_proposals,
     "leakage": validate_leakage,
     "decisiveness": validate_decisiveness,
+    "judges": validate_judges,
 }
 
 # The field each stage file is keyed by (unique per file); ``id`` always joins back to ``cases``.
@@ -301,6 +375,7 @@ STAGE_KEYS: Dict[str, str] = {
     "crux_proposals": "crux_id",
     "leakage": "crux_id",
     "decisiveness": "crux_id",
+    "judges": "crux_id",
 }
 
 

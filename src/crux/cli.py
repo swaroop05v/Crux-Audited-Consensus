@@ -5,6 +5,8 @@
     crux track1 leakage  --run seed_fake [--l2 --backend fake]
     crux track1 decisive --run seed_fake --backend fake --k 3
     crux track1 report   --run seed_fake
+    crux track2 judge    --run seed_fake --backend fake
+    crux track2 report   --run seed_fake
     crux smoke consultants --backend vllm --n 2   (needs live vLLM servers)
 
 Stage files go to data/runs/<run>/<stage>.jsonl (gitignored). Without installing: PYTHONPATH=src python -m crux ...
@@ -30,10 +32,16 @@ def _common(parser: argparse.ArgumentParser, *, backend_default: Optional[str] =
                              "seeds do not depend on it.")
 
 
+def _csv(value: str) -> List[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 def build_parser() -> argparse.ArgumentParser:
     from crux import smoke
     from crux.data import seed
     from crux.track1 import decisiveness, extractor, leakage, report
+    from crux.track2 import judges
+    from crux.track2 import report as track2_report
 
     parser = argparse.ArgumentParser(prog="crux", description="Crux-Audited Consensus pipeline stages.")
     groups = parser.add_subparsers(dest="group", required=True)
@@ -97,6 +105,30 @@ def build_parser() -> argparse.ArgumentParser:
                                                 "-> track1_report.json")
     summary.add_argument("--run", required=True)
     summary.set_defaults(func=lambda a: report.run_report(run=a.run))
+
+    track2 = groups.add_parser("track2", help="Weak judges and checkability.").add_subparsers(
+        dest="command", required=True)
+
+    # No --cases: a judge sees the claim alone. No --workers: hf_local's set_seed is process-global.
+    judge = track2.add_parser("judge", help="Prompt 2A, c_prob and c_cons per crux and layer -> judges.jsonl. A "
+                                            "finished layer is checkpointed, so rerunning the same command resumes.")
+    judge.add_argument("--run", required=True, help="Run name; reads data/runs/<run>/crux_proposals.jsonl.")
+    judge.add_argument("--backend", required=True, help="fake (canned replies, offline) or hf_local.")
+    judge.add_argument("--layers", type=_csv, default=list(judges.DEFAULT_LAYERS),
+                       help="Comma-separated judge model keys, run one at a time.")
+    judge.add_argument("--c-cons-layers", type=_csv, default=list(judges.DEFAULT_C_CONS_LAYERS),
+                       help="Comma-separated layers that also get c_cons; empty skips it.")
+    judge.add_argument("--limit", type=int, help="Only the first N cruxes.")
+    judge.add_argument("--max-tokens", type=int, default=judges.DEFAULT_MAX_TOKENS)
+    judge.add_argument("--seed", type=int, default=42, help="Base seed; per-call seeds derive from it.")
+    judge.set_defaults(func=lambda a: judges.run_stage(
+        run=a.run, backend_name=a.backend, layers=a.layers, c_cons_layers=a.c_cons_layers, limit=a.limit,
+        max_tokens=a.max_tokens, seed=a.seed))
+
+    judge_summary = track2.add_parser("report", help="TRUE rates, failures, c_prob, c_cons and layer agreement "
+                                                     "-> track2_report.json")
+    judge_summary.add_argument("--run", required=True)
+    judge_summary.set_defaults(func=lambda a: track2_report.run_report(run=a.run))
     return parser
 
 

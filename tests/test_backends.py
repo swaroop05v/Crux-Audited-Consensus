@@ -1,7 +1,9 @@
 """Backend tests. Fake backend and fake HTTP session only: no network, no GPU, no real model."""
 
 import json
+import sys
 import unittest
+from unittest import mock
 
 from crux.backends import BackendError, Registry, get_backend, strip_think
 from crux.backends.fake import FakeBackend
@@ -288,6 +290,80 @@ class VerdictReadoutTest(unittest.TestCase):
         self.assertEqual(backend._loaded, {})
         with self.assertRaises(BackendError):
             backend.spec("consultant_a")  # consultants are pinned to vllm
+
+
+class StubOutOfMemory(RuntimeError):
+    pass
+
+
+def stub_torch(*, cuda_available=True):
+    """A stand-in for torch, so these run without a GPU, or without torch at all."""
+    torch = mock.MagicMock()
+    torch.cuda.OutOfMemoryError = StubOutOfMemory
+    torch.cuda.is_available.return_value = cuda_available
+    return torch
+
+
+class ReleaseTest(unittest.TestCase):
+    def test_release_drops_the_model_and_empties_the_gpu_cache(self):
+        backend = HFLocalBackend(REGISTRY)
+        backend._loaded = {"judge_l1_qwen": ("tokenizer", "model"), "judge_l2_llama": ("tokenizer", "model")}
+        torch = stub_torch()
+        with mock.patch.dict(sys.modules, {"torch": torch}):
+            backend.release("judge_l1_qwen")
+        self.assertEqual(list(backend._loaded), ["judge_l2_llama"])
+        torch.cuda.empty_cache.assert_called_once()
+
+    def test_release_of_a_model_that_is_not_loaded_does_nothing(self):
+        torch = stub_torch()
+        with mock.patch.dict(sys.modules, {"torch": torch}):
+            HFLocalBackend(REGISTRY).release("judge_l1_qwen")
+        torch.cuda.empty_cache.assert_not_called()
+
+    def test_release_without_a_gpu(self):
+        backend = HFLocalBackend(REGISTRY)
+        backend._loaded = {"judge_l1_qwen": ("tokenizer", "model")}
+        torch = stub_torch(cuda_available=False)
+        with mock.patch.dict(sys.modules, {"torch": torch}):
+            backend.release("judge_l1_qwen")
+        self.assertEqual(backend._loaded, {})
+        torch.cuda.empty_cache.assert_not_called()
+
+    def test_other_backends_hold_nothing_to_release(self):
+        self.assertIsNone(FakeBackend(REGISTRY).release("judge_l1_qwen"))
+
+
+class OutOfMemoryTest(unittest.TestCase):
+    """A CUDA OOM must reach safe_chat as a BackendError, or it would end the run instead of failing one call."""
+
+    def setUp(self):
+        self.torch = stub_torch()
+        modules = mock.patch.dict(sys.modules, {"torch": self.torch, "transformers": mock.MagicMock()})
+        modules.start()
+        self.addCleanup(modules.stop)
+        self.tokenizer, self.model = mock.MagicMock(), mock.MagicMock()
+        self.tokenizer.apply_chat_template.return_value = "prompt"
+        self.tokenizer.return_value.to.return_value = {"input_ids": "ids"}
+        self.backend = HFLocalBackend(REGISTRY)
+        self.backend._loaded["judge_l1_qwen"] = (self.tokenizer, self.model)
+
+    def test_oom_during_generate_is_a_backend_error(self):
+        self.model.generate.side_effect = StubOutOfMemory("CUDA out of memory")
+        with self.assertRaisesRegex(BackendError, "judge_l1_qwen: GPU out of memory"):
+            self.backend.chat("judge_l1_qwen", MESSAGES, **JUDGE)
+        self.torch.cuda.empty_cache.assert_called_once()
+
+    def test_oom_during_the_c_prob_pass_is_a_backend_error(self):
+        self.model.side_effect = StubOutOfMemory("CUDA out of memory")
+        with self.assertRaisesRegex(BackendError, "judge_l1_qwen: GPU out of memory"):
+            self.backend.verdict_probs("judge_l1_qwen", MESSAGES, "work\nVERDICT: TRUE")
+        self.torch.cuda.empty_cache.assert_called_once()
+
+    def test_other_errors_are_not_swallowed(self):
+        self.model.generate.side_effect = ValueError("bad generation config")
+        with self.assertRaises(ValueError):
+            self.backend.chat("judge_l1_qwen", MESSAGES, **JUDGE)
+        self.torch.cuda.empty_cache.assert_not_called()
 
 
 if __name__ == "__main__":

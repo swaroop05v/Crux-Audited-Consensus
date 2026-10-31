@@ -230,3 +230,6 @@ class Backend(ABC):
                       *, marker: str = "VERDICT:") -> Dict[str, Any]:
         """Next-token TRUE/FALSE probabilities after ``marker`` (audit 4.2). Needs the full distribution."""
         raise NotImplementedError(f"{self.name} cannot return full next-token distributions")
+
+    def release(self, model_key: str) -> None:
+        """Free what this backend holds for a model. Only in-process backends hold anything."""

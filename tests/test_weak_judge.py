@@ -8,6 +8,7 @@ from crux.backends.hf_local import HFLocalBackend, VerdictMarkerMissing
 from crux.prompts import PromptError
 from crux.track2.weak_judge import (
     judge_crux,
+    judge_crux_recorded,
     judge_full_question,
     judge_question_plus_crux,
     measure_c_cons,
@@ -327,6 +328,147 @@ class MeasureCProbTest(unittest.TestCase):
                 model_key="judge_l1_qwen",
                 backend=self.backend,
             )
+
+
+class JudgeCruxRecordedTest(unittest.TestCase):
+    def setUp(self):
+        self.registry = Registry.load()
+
+    def judge(self, responder, **options):
+        backend = get_backend(self.registry, "fake", responder=responder, **options)
+        return judge_crux_recorded(
+            "7 * 13 = 91",
+            model_key="judge_l1_qwen",
+            backend=backend,
+            registry=self.registry,
+            seed=42,
+        )
+
+    def test_valid_reply(self):
+        result = self.judge("Reasoning\nVERDICT: FALSE")
+
+        self.assertEqual(result["verdict"], "FALSE")
+        self.assertEqual(result["seed"], 42)
+        self.assertTrue(result["parse_ok"])
+        self.assertIsNone(result["failure_type"])
+        self.assertEqual(result["model_call"]["temperature"], 0.0)
+
+    def test_unparseable_reply_is_recorded(self):
+        result = self.judge("The claim is correct.")
+
+        self.assertIsNone(result["verdict"])
+        self.assertEqual(result["failure_type"], "parse_error")
+        self.assertEqual(result["raw_output"], "The claim is correct.")
+
+    def test_truncated_reply_is_recorded(self):
+        result = self.judge("VERDICT: TRUE", finish_reason="length")
+
+        self.assertIsNone(result["verdict"])
+        self.assertEqual(result["failure_type"], "truncated")
+
+    def test_failed_call_is_recorded(self):
+        def fail(model_key, messages, index):
+            raise BackendError("HTTP 503")
+
+        result = self.judge(fail)
+
+        self.assertIsNone(result["verdict"])
+        self.assertEqual(result["failure_type"], "call_error")
+        self.assertEqual(result["call_error"], "HTTP 503")
+
+    def test_named_sampling_profile_is_used(self):
+        registry = Registry(
+            self.registry.models,
+            self.registry.backends,
+            {"judge_layer2": {"temperature": 0.25, "top_p": None}},
+        )
+        backend = get_backend(registry, "fake", responder="VERDICT: TRUE")
+
+        judge_crux_recorded(
+            "7 * 13 = 91",
+            model_key="judge_l1_qwen",
+            backend=backend,
+            registry=registry,
+            seed=42,
+            sampling_profile="judge_layer2",
+        )
+
+        self.assertEqual(backend.calls[0]["temperature"], 0.25)
+
+    def test_configuration_errors_raise(self):
+        backend = get_backend(self.registry, "fake", responder="VERDICT: TRUE")
+
+        with self.assertRaisesRegex(BackendError, "unknown model key"):
+            judge_crux_recorded(
+                "7 * 13 = 91",
+                model_key="no_such_model",
+                backend=backend,
+                registry=self.registry,
+                seed=42,
+            )
+        with self.assertRaisesRegex(BackendError, "unknown sampling profile"):
+            judge_crux_recorded(
+                "7 * 13 = 91",
+                model_key="judge_l1_qwen",
+                backend=backend,
+                registry=self.registry,
+                seed=42,
+                sampling_profile="no_such_profile",
+            )
+        with self.assertRaises(ValueError):
+            judge_crux_recorded(
+                " ",
+                model_key="judge_l1_qwen",
+                backend=backend,
+                registry=self.registry,
+                seed=42,
+            )
+        self.assertEqual(len(backend.calls), 0)
+
+
+class MeasureCConsMetaTest(unittest.TestCase):
+    def test_meta_reads_sampling_from_the_registry(self):
+        base = Registry.load()
+        registry = Registry(
+            base.models,
+            base.backends,
+            {"judge_cons": {"temperature": 0.35, "top_p": 0.8}},
+        )
+        result = measure_c_cons(
+            "7 * 13 = 91",
+            model_key="judge_l1_qwen",
+            backend=get_backend(registry, "fake", responder="VERDICT: TRUE"),
+            registry=registry,
+            seeds=[1, 2, 3, 4, 5],
+        )
+
+        self.assertEqual(result["meta"]["temperature"], 0.35)
+        self.assertEqual(result["meta"]["top_p"], 0.8)
+
+
+class MeasureCProbValueTest(unittest.TestCase):
+    def measure(self, p_true_raw, p_false_raw):
+        registry = Registry.load()
+        backend = get_backend(
+            registry,
+            "fake",
+            verdict={"p_true_raw": p_true_raw, "p_false_raw": p_false_raw},
+        )
+        return measure_c_prob(
+            "7 * 13 = 91",
+            "VERDICT: TRUE",
+            model_key="judge_l1_qwen",
+            backend=backend,
+        )
+
+    def test_c_prob_is_the_renormalized_margin(self):
+        self.assertAlmostEqual(self.measure(0.6, 0.2)["c_prob"], 0.5)
+        self.assertAlmostEqual(self.measure(0.2, 0.6)["c_prob"], 0.5)
+        self.assertAlmostEqual(self.measure(0.4, 0.4)["c_prob"], 0.0)
+        self.assertAlmostEqual(self.measure(0.9, 0.0)["c_prob"], 1.0)
+
+    def test_zero_mass_gives_none(self):
+        self.assertIsNone(self.measure(0.0, 0.0)["c_prob"])
 
 
 class MeasureCConsTest(unittest.TestCase):
