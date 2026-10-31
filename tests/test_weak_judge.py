@@ -1,7 +1,11 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from crux.backends import Registry, get_backend
-from crux.backends.hf_local import VerdictMarkerMissing
+from crux.backends import BackendError, Registry, get_backend
+from crux.backends.hf_local import HFLocalBackend, VerdictMarkerMissing
+from crux.prompts import PromptError
 from crux.track2.weak_judge import (
     judge_crux,
     judge_full_question,
@@ -24,13 +28,51 @@ class ParseVerdictTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_verdict("I think the statement is true.")
 
-    def test_lowercase_verdict_is_rejected(self):
-        with self.assertRaises(ValueError):
-            parse_verdict("VERDICT: true")
+    def test_accepted_formats(self):
+        cases = {
+            "**VERDICT: TRUE**": "TRUE",
+            "**VERDICT: FALSE**": "FALSE",
+            "*VERDICT: TRUE*": "TRUE",
+            "***VERDICT: FALSE***": "FALSE",
+            "VERDICT: true": "TRUE",
+            "VERDICT: false": "FALSE",
+            "VERDICT: True": "TRUE",
+            "VERDICT: fAlSe": "FALSE",
+            "VERDICT: TRUE.": "TRUE",
+            "VERDICT: false.": "FALSE",
+            "**VERDICT: TRUE.**": "TRUE",
+            "**VERDICT: False**.": "FALSE",
+        }
+        for line, expected in cases.items():
+            with self.subTest(line=line):
+                self.assertEqual(parse_verdict(f"Reasoning.\n{line}"), expected)
+
+    def test_windows_line_ending_is_accepted(self):
+        self.assertEqual(parse_verdict("Reasoning.\r\n**VERDICT: true.**\r\n"), "TRUE")
+
+    def test_identical_verdict_lines_are_accepted(self):
+        self.assertEqual(parse_verdict("VERDICT: TRUE\nVERDICT: TRUE"), "TRUE")
+        self.assertEqual(parse_verdict("VERDICT: FALSE\n**VERDICT: false.**"), "FALSE")
 
     def test_multiple_verdicts_are_rejected(self):
         with self.assertRaises(ValueError):
             parse_verdict("VERDICT: TRUE\nVERDICT: FALSE")
+
+    def test_conflicting_verdicts_across_formats_are_rejected(self):
+        with self.assertRaises(ValueError):
+            parse_verdict("**VERDICT: true**\nVERDICT: FALSE.")
+
+    def test_keyword_stays_uppercase_and_alone_on_the_line(self):
+        for text in (
+            "verdict: TRUE",
+            "Verdict: TRUE",
+            "**VERDICT:** TRUE",
+            "VERDICT: **TRUE**",
+            "My VERDICT: TRUE",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    parse_verdict(text)
 
 class ParseFinalAnswerTest(unittest.TestCase):
     def test_valid_first_candidate(self):
@@ -355,21 +397,198 @@ class MeasureCConsTest(unittest.TestCase):
                 seeds=[101, 102, 103, 104, 104],
             )
 
-    def test_rejects_invalid_sample_verdict(self):
+    def measure(self, responder, **backend_options):
         backend = get_backend(
-            self.registry,
-            "fake",
-            responder="The claim is correct.",
+            self.registry, "fake", responder=responder, **backend_options
+        )
+        return measure_c_cons(
+            "7 * 13 = 91",
+            model_key="judge_l1_qwen",
+            backend=backend,
+            registry=self.registry,
+            seeds=self.seeds,
         )
 
-        with self.assertRaises(ValueError):
+    def test_c_cons_values(self):
+        for true_count, false_count, expected in (
+            (5, 0, 1.0),
+            (4, 1, 0.6),
+            (3, 2, 0.2),
+            (2, 3, 0.2),
+            (0, 5, 1.0),
+        ):
+            with self.subTest(true=true_count, false=false_count):
+                result = self.measure(
+                    ["VERDICT: TRUE"] * true_count
+                    + ["VERDICT: FALSE"] * false_count
+                )
+                self.assertAlmostEqual(result["c_cons"], expected)
+                self.assertEqual(result["true_count"], true_count)
+                self.assertEqual(result["false_count"], false_count)
+                self.assertEqual(result["n_valid"], 5)
+                self.assertEqual(result["n_failed"], 0)
+                self.assertIsNone(result["c_cons_error"])
+
+    def test_valid_samples_record_finish_reason_and_no_failure(self):
+        result = self.measure("VERDICT: TRUE")
+
+        for sample in result["samples"]:
+            self.assertTrue(sample["parse_ok"])
+            self.assertIsNone(sample["parse_error"])
+            self.assertIsNone(sample["failure_type"])
+            self.assertIsNone(sample["call_error"])
+            self.assertEqual(sample["finish_reason"], "stop")
+            self.assertEqual(sample["raw_output"], "VERDICT: TRUE")
+            self.assertEqual(sample["model_call"]["model_key"], "judge_l1_qwen")
+
+    def test_one_failed_sample_is_left_out_of_c_cons(self):
+        result = self.measure(
+            [
+                "VERDICT: TRUE",
+                "VERDICT: TRUE",
+                "The claim is correct.",
+                "VERDICT: TRUE",
+                "VERDICT: FALSE",
+            ]
+        )
+
+        self.assertEqual(len(result["samples"]), 5)
+        self.assertEqual(result["true_count"], 3)
+        self.assertEqual(result["false_count"], 1)
+        self.assertEqual(result["n_valid"], 4)
+        self.assertEqual(result["n_failed"], 1)
+        self.assertAlmostEqual(result["c_cons"], 0.5)
+        self.assertAlmostEqual(result["agreement_rate"], 0.75)
+        self.assertEqual(result["majority_verdict"], "TRUE")
+        self.assertIsNone(result["c_cons_error"])
+
+        failed = result["samples"][2]
+        self.assertEqual(failed["seed"], 103)
+        self.assertIsNone(failed["verdict"])
+        self.assertFalse(failed["parse_ok"])
+        self.assertIn("VERDICT", failed["parse_error"])
+        self.assertEqual(failed["failure_type"], "parse_error")
+        self.assertEqual(failed["raw_output"], "The claim is correct.")
+
+    def test_all_failed_samples_give_no_measurement(self):
+        result = self.measure("The claim is correct.")
+
+        self.assertEqual(len(result["samples"]), 5)
+        self.assertEqual(result["true_count"], 0)
+        self.assertEqual(result["false_count"], 0)
+        self.assertEqual(result["n_valid"], 0)
+        self.assertEqual(result["n_failed"], 5)
+        self.assertIsNone(result["c_cons"])
+        self.assertIsNone(result["agreement_rate"])
+        self.assertIsNone(result["majority_verdict"])
+        self.assertIn("no valid samples", result["c_cons_error"])
+        self.assertIn("5 parse_error", result["c_cons_error"])
+
+    def test_even_split_after_failure_is_a_tie(self):
+        result = self.measure(
+            [
+                "VERDICT: TRUE",
+                "VERDICT: FALSE",
+                "The claim is correct.",
+                "VERDICT: TRUE",
+                "VERDICT: FALSE",
+            ]
+        )
+
+        self.assertEqual(result["n_valid"], 4)
+        self.assertAlmostEqual(result["c_cons"], 0.0)
+        self.assertAlmostEqual(result["agreement_rate"], 0.5)
+        self.assertEqual(result["majority_verdict"], "TIE")
+
+    def test_truncated_sample_is_not_trusted(self):
+        result = self.measure(
+            "VERDICT: TRUE",
+            finish_reason=lambda key, index: "length" if index == 1 else "stop",
+        )
+
+        truncated = result["samples"][1]
+        self.assertIsNone(truncated["verdict"])
+        self.assertFalse(truncated["parse_ok"])
+        self.assertEqual(truncated["failure_type"], "truncated")
+        self.assertEqual(truncated["parse_error"], "truncated at max_tokens")
+        self.assertEqual(truncated["finish_reason"], "length")
+        self.assertTrue(truncated["model_call"]["truncated"])
+        self.assertEqual(result["n_valid"], 4)
+        self.assertEqual(result["n_failed"], 1)
+        self.assertEqual(result["true_count"], 4)
+        self.assertAlmostEqual(result["c_cons"], 1.0)
+
+    def test_failed_call_is_recorded_and_sampling_continues(self):
+        attempts = []
+
+        def flaky(model_key, messages, index):
+            # FakeBackend records a call only after the responder returns, so index stays put after a raise.
+            attempts.append(index)
+            if len(attempts) == 1:
+                raise BackendError("HTTP 503 after retries")
+            return "VERDICT: TRUE"
+
+        result = self.measure(flaky)
+
+        failed = result["samples"][0]
+        self.assertIsNone(failed["verdict"])
+        self.assertFalse(failed["parse_ok"])
+        self.assertEqual(failed["failure_type"], "call_error")
+        self.assertEqual(failed["call_error"], "HTTP 503 after retries")
+        self.assertIsNone(failed["finish_reason"])
+        self.assertIsNone(failed["raw_output"])
+        self.assertIsNone(failed["model_call"])
+        self.assertEqual(len(attempts), 5)
+        self.assertEqual(result["n_valid"], 4)
+        self.assertEqual(result["n_failed"], 1)
+
+    def test_unknown_model_key_raises(self):
+        with self.assertRaisesRegex(BackendError, "unknown model key"):
             measure_c_cons(
                 "7 * 13 = 91",
-                model_key="judge_l1_qwen",
-                backend=backend,
+                model_key="no_such_model",
+                backend=self.backend,
                 registry=self.registry,
                 seeds=self.seeds,
             )
+        self.assertEqual(len(self.backend.calls), 0)
+
+    def test_backend_mismatch_raises(self):
+        # FakeBackend skips the pin check by design, so this needs a real backend class.
+        with self.assertRaisesRegex(BackendError, "pinned to backend"):
+            measure_c_cons(
+                "7 * 13 = 91",
+                model_key="consultant_a",
+                backend=HFLocalBackend(self.registry),
+                registry=self.registry,
+                seeds=self.seeds,
+            )
+
+    def test_missing_prompt_file_raises(self):
+        with tempfile.TemporaryDirectory() as empty:
+            with mock.patch("crux.prompts.PROMPTS_DIR", Path(empty)):
+                with self.assertRaises(PromptError):
+                    measure_c_cons(
+                        "7 * 13 = 91",
+                        model_key="judge_l1_qwen",
+                        backend=self.backend,
+                        registry=self.registry,
+                        seeds=self.seeds,
+                    )
+        self.assertEqual(len(self.backend.calls), 0)
+
+    def test_unknown_sampling_profile_raises(self):
+        registry = Registry(self.registry.models, self.registry.backends, {})
+
+        with self.assertRaisesRegex(BackendError, "unknown sampling profile"):
+            measure_c_cons(
+                "7 * 13 = 91",
+                model_key="judge_l1_qwen",
+                backend=self.backend,
+                registry=registry,
+                seeds=self.seeds,
+            )
+        self.assertEqual(len(self.backend.calls), 0)
 
 if __name__ == "__main__":
     unittest.main()

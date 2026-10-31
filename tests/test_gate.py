@@ -169,6 +169,86 @@ class TestApplyGate(unittest.TestCase):
         self.assertEqual(result["p2_alt_answer"], "B")
         self.assertEqual(result["dr_consensus_relation"], "confirms")
 
+    def test_vetoed_candidate_with_d_zero_candidate_reports_veto(self):
+        result = apply_gate(
+            [
+                candidate("c1", veto_flag=True, d=0.9),
+                candidate("c2", d=0.0),
+            ],
+            tau=0.5,
+            c_signal="c_cons",
+            dr_consensus_answer="B",
+            p1_mode="flag",
+        )
+        self.assertEqual(result["selection_reason"], "veto")
+        self.assertIsNone(result["selected_crux_id"])
+        self.assertEqual(result["final_answer"], "B")
+        self.assertEqual(result["final_source"], "dr_consensus")
+        self.assertEqual(result["p1_veto_crux_ids"], ["c1"])
+
+    def test_vetoed_candidate_with_layers_disagreeing_reports_veto(self):
+        result = apply_gate(
+            [
+                candidate("c1", veto_flag=True, d=0.9),
+                candidate(
+                    "c2",
+                    layer_verdicts={
+                        "judge_l1_qwen": "TRUE",
+                        "judge_l2_llama": "FALSE",
+                    },
+                ),
+            ],
+            tau=0.5,
+            c_signal="c_cons",
+            p1_mode="flag",
+        )
+        self.assertEqual(result["selection_reason"], "veto")
+
+    def test_lone_vetoed_candidate_reports_veto(self):
+        result = apply_gate(
+            [candidate("c1", veto_flag=True)],
+            tau=0.5,
+            c_signal="c_cons",
+            p1_mode="flag",
+        )
+        self.assertEqual(result["selection_reason"], "veto")
+
+    def test_veto_on_d_zero_candidate_stays_d_zero(self):
+        result = apply_gate(
+            [candidate("c1", veto_flag=True, d=0.0)],
+            tau=0.5,
+            c_signal="c_cons",
+            p1_mode="flag",
+        )
+        self.assertEqual(result["selection_reason"], "d_zero")
+
+    def test_veto_on_layer_disagreement_stays_layers_disagree(self):
+        result = apply_gate(
+            [
+                candidate(
+                    "c1",
+                    veto_flag=True,
+                    layer_verdicts={
+                        "judge_l1_qwen": "TRUE",
+                        "judge_l2_llama": "FALSE",
+                    },
+                )
+            ],
+            tau=0.5,
+            c_signal="c_cons",
+            p1_mode="flag",
+        )
+        self.assertEqual(result["selection_reason"], "layers_disagree")
+
+    def test_veto_on_leaky_candidate_stays_all_leaky(self):
+        result = apply_gate(
+            [candidate("c1", veto_flag=True, leaky=True)],
+            tau=0.5,
+            c_signal="c_cons",
+            p1_mode="flag",
+        )
+        self.assertEqual(result["selection_reason"], "all_leaky")
+
     def test_all_leaky_candidates_abstain(self):
         result = apply_gate(
             [candidate("c1", leaky=True)],
