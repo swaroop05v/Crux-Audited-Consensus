@@ -114,6 +114,13 @@ def _reason_without_eligible(
         return "all_leaky"
     if not any(c["parsed"] and not c["leaky"] for c in candidates):
         return "no_candidates"
+    # Without its veto_flag, such a candidate would have been eligible.
+    if any(
+        c["parsed"] and not c["leaky"] and c["d"] > 0
+        and _layers_agree(c) and c["veto_flag"]
+        for c in candidates
+    ):
+        return "veto"
     if not any(
         c["parsed"] and not c["leaky"] and c["d"] > 0
         for c in candidates
